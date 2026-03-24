@@ -1,3 +1,4 @@
-from .additional_compressors import additional_compressors
-from .direct_replacement import direct_replacement
-from .parallel_loop import parallel_loop
+from BlendPATH.modifications.additional_compressors import additional_compressors
+from BlendPATH.modifications.direct_replacement import direct_replacement
+from BlendPATH.modifications.new_h2_pipeline import new_h2_pipeline
+from BlendPATH.modifications.parallel_loop import parallel_loop

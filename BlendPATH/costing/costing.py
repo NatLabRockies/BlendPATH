@@ -1,73 +1,20 @@
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os.path import exists
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 from importlib_resources import files
 from ProFAST import ProFAST
 
+import BlendPATH.costing.pipe_costs.steel_pipe_costs
 import BlendPATH.Global as gl
-import BlendPATH.network.pipeline_components as bp_plc
-import BlendPATH.util.pipe_assessment as bp_pa
 
-ANL_COEFS = {
-    "GP": {
-        "Labor": [10406, 0.20953, -0.08419],
-        "Misc": [4944, 0.17351, -0.07621],
-        "ROW": [2751, -0.28294, 0.00731],
-        "Material": [5813, 0.31599, -0.00376],
-    },
-    "NE": {
-        "Labor": [249131, -0.33162, -0.17892],
-        "Misc": [65990, -0.29673, -0.06856],
-        "ROW": [83124, -0.66357, -0.07544],
-        "Material": [10409, 0.296847, -0.07257],
-    },
-    "MA": {
-        "Labor": [43692, 0.05683, -0.10108],
-        "Misc": [14616, 0.16354, -0.16186],
-        "ROW": [1942, 0.17394, -0.01555],
-        "Material": [9113, 0.279875, -0.00840],
-    },
-    "GL": {
-        "Labor": [58154, -0.14821, -0.10596],
-        "Misc": [41238, -0.34751, -0.11104],
-        "ROW": [14259, -0.65318, 0.06865],
-        "Material": [8971, 0.255012, -0.03138],
-    },
-    "RM": {
-        "Labor": [10406, 0.20953, -0.08419],
-        "Misc": [4944, 0.17351, -0.07621],
-        "ROW": [2751, -0.28294, 0.00731],
-        "Material": [5813, 0.31599, -0.00376],
-    },
-    "SE": {
-        "Labor": [32094, 0.06110, -0.14828],
-        "Misc": [11270, 0.19077, -0.13669],
-        "ROW": [9531, -0.37284, 0.02616],
-        "Material": [6207, 0.38224, -0.05211],
-    },
-    "PN": {
-        "Labor": [32094, 0.06110, -0.14828],
-        "Misc": [11270, 0.19077, -0.13669],
-        "ROW": [9531, -0.37284, 0.02616],
-        "Material": [6207, 0.38224, -0.05211],
-    },
-    "SW": {
-        "Labor": [95295, -0.53848, 0.03070],
-        "Misc": [19211, -0.14178, -0.04697],
-        "ROW": [72634, -1.07566, 0.05284],
-        "Material": [5605, 0.41642, -0.06441],
-    },
-    "CA": {
-        "Labor": [95295, -0.53848, 0.03070],
-        "Misc": [19211, -0.14178, -0.04697],
-        "ROW": [72634, -1.07566, 0.05284],
-        "Material": [5605, 0.41642, -0.06441],
-    },
-}
+if TYPE_CHECKING:
+    from BlendPATH.modifications.mod_util import Mod_costing_params
+    from BlendPATH.network.pipeline_components import Composition
 
 COMPR_COSTS = {
     "Material": [3175286, 532.7853, 0.0010416],
@@ -83,69 +30,36 @@ class Costing_params:
     Grouping of cost parameters from BlendPATH_scenario
     """
 
-    h2_price: float
-    ng_price: float
-    elec_price: float
-    region: str
-    cf_price: float
-    casestudy_name: str
-    ili_interval: float
-    original_pipeline_cost: float
-    pipe_markup: float
-    compressor_markup: float
-    financial_overrides: float
+    h2_price: float = None
+    ng_price: float = None
+    elec_price: float = None
+    region: str = None
+    cf_price: float = None
+    casestudy_name: str = None
+    ili_interval: float = None
+    original_pipeline_cost: float = None
+    pipe_markup: float = None
+    compressor_markup: float = None
+    financial_overrides: dict = field(default_factory=dict)
+    steel_cost: dict = None
 
 
 def get_steel_cost_file(steel_cost_file: str) -> dict:
     """
     Retrieve steel cost file
     """
-    with open(steel_cost_file, newline="") as csvfile:
-        reader = csv.DictReader(csvfile)
-        return {row["Steel grade"]: float(row["Price [$/kg]"]) for row in reader}
-
-
-def get_steel_cost(cp: Costing_params, grade: str, mass: float) -> float:
-    """
-    Retrive steel cost based on grade
-    """
-    if grade not in cp.steel_cost.keys():
-        raise ValueError(f"{grade} is not a valid steel grade")
-    unit_price = cp.steel_cost[grade]
-    price = unit_price * mass
-
-    return price
-
-
-def get_ANL_costs_in_mi(
-    diameter_mm: float, length_km: float, region: str, c_type=list
-) -> float:
-    """
-    Get cost correlations from Brown, Reddi, Elgowainy, Int J. Hydrogen Energy, 2022
-    """
-    d_in = diameter_mm * gl.MM2IN
-    l_mi = length_km * gl.KM2MI
-    if region not in ANL_COEFS.keys():
-        raise ValueError(f"{region} is not a valid region")
-
-    anl_reg = ANL_COEFS[region]
-
-    c = anl_reg[c_type]
-    cost_res = c[0] * d_in ** c[1] * l_mi ** c[2]
-    return cost_res
+    return BlendPATH.costing.pipe_costs.steel_pipe_costs.get_steel_cost_file(
+        steel_cost_file=steel_cost_file
+    )
 
 
 def get_pipe_cost_file(pipe_file: str) -> dict:
     """
     Get override pipe cost file
     """
-    with open(pipe_file, newline="") as csvfile:
-        reader = csv.DictReader(csvfile)
-        return {
-            row["Parameter"]: float(row["Price [$/in/mi]"])
-            for row in reader
-            if row["Price [$/in/mi]"] != ""
-        }
+    return BlendPATH.costing.pipe_costs.steel_pipe_costs.get_pipe_cost_file(
+        pipe_file=pipe_file
+    )
 
 
 def get_compressor_cost_file(compressor_file: str) -> dict:
@@ -161,82 +75,29 @@ def get_compressor_cost_file(compressor_file: str) -> dict:
         }
 
 
-def get_pipe_other_cost(
-    cp: Costing_params, d_mm: float, l_km: float, anl_types: list
-) -> dict:
-    """
-    Get material and other costs for pipes
-    """
-    all_other_cost = {x: 0 for x in ["Mat"] + anl_types}
-    if l_km == 0:
-        return all_other_cost
-    d_in = d_mm * gl.MM2IN
-    l_mi = l_km * gl.KM2MI
-    per_in_mi_costs = {x: 0 for x in anl_types}
-    for x in per_in_mi_costs.keys():
-        if x in cp.pipe_cost_override.keys():
-            per_in_mi_costs[x] = cp.pipe_cost_override[x]
-        else:
-            per_in_mi_costs[x] = get_ANL_costs_in_mi(
-                diameter_mm=d_mm, length_km=l_km, region=cp.region, c_type=x
-            )
-        all_other_cost[x] = per_in_mi_costs[x] * d_in * l_mi * cp.pipe_markup
-
-    return all_other_cost
-
-
-def get_pipe_material_cost(
-    cp: Costing_params, di_mm: float, do_mm: float, l_km: float, grade: str
-) -> float:
-    """
-    Pipe material cost
-    """
-    pipe_vol_m3 = bp_pa.get_pipe_volume(
-        diam_i_m=di_mm * gl.MM2M,
-        diam_o_m=do_mm * gl.MM2M,
-        length_m=l_km * gl.KM2M,
-    )
-    pipe_mass_kg = bp_pa.get_pipe_mass(volume_m3=pipe_vol_m3)
-    pipe_mat_cost = get_steel_cost(cp=cp, grade=grade, mass=pipe_mass_kg)
-
-    return pipe_mat_cost * cp.pipe_markup
-
-
 def calc_lcot(
-    json_file: str,
-    capacity: float,
-    new_pipe_cap: float,
-    comp_cost: float,
-    revamped_comp_capex: float,
-    supply_comp_capex: float,
-    compressor_fuel: float,
-    compressor_fuel_elec: float,
-    supply_comp_fuel: dict,
-    cs_cost: float,
-    elec_cost: float,
-    meter_cost: float = 0,
-    ili_costs: float = 0,
-    valve_cost: float = 0,
-    original_network_residual_value: float = 0,
-    financial_overrides: dict = None,
-) -> pd.DataFrame:
+    mod_costing_params: "Mod_costing_params",
+    new_pipe_capex: float,
+    costing_params: Costing_params,
+) -> tuple[dict[str, float], dict[str, Any]]:
     """
-    Calaculate the levelized cost of transport with ProFAST
+    Calculate the levelized cost of transport with ProFAST
     """
-    jsonfilename = f"{json_file}/financial_params.json"
+
+    jsonfilename = f"{costing_params.casestudy_name}/financial_params.json"
     if not exists(jsonfilename):
         jsonfilename = files("BlendPATH.costing").joinpath(
             "default_financial_params.json"
         )
 
     pf = ProFAST(jsonfilename)
-    if financial_overrides is not None:
-        for i, v in financial_overrides.items():
+    if costing_params.financial_overrides is not None:
+        for i, v in costing_params.financial_overrides.items():
             pf.set_params(i, v)
 
     gen_inflation = pf.vals["general inflation rate"]
 
-    pf.set_params("capacity", capacity)  # MMBTU/day
+    pf.set_params("capacity", mod_costing_params.capacity)  # MMBTU/day
     pf.set_params(
         "commodity",
         {
@@ -265,31 +126,31 @@ def calc_lcot(
     # Add compressor fuel (gas and electric)
     pf.add_feedstock(
         name=col_names["fuel"],
-        usage=compressor_fuel,
+        usage=mod_costing_params.all_fuel_usage,
         unit="MMBTU",
-        cost=cs_cost,
+        cost=costing_params.cf_price,
         escalation=gen_inflation,
     )
     pf.add_feedstock(
         name=col_names["fuel_elec"],
-        usage=compressor_fuel_elec,
+        usage=mod_costing_params.all_fuel_elec,
         unit="kWh",
-        cost=elec_cost,
+        cost=costing_params.elec_price,
         escalation=gen_inflation,
     )
 
     pf.add_feedstock(
         name=col_names["supply_fuel_elec"],
-        usage=supply_comp_fuel["elec"],
+        usage=mod_costing_params.supply_comp_fuel["elec"],
         unit="kWh",
-        cost=elec_cost,
+        cost=costing_params.elec_price,
         escalation=gen_inflation,
     )
     pf.add_feedstock(
         name=col_names["supply_fuel_gas"],
-        usage=supply_comp_fuel["gas"],
+        usage=mod_costing_params.supply_comp_fuel["gas"],
         unit="MMBTU",
-        cost=cs_cost,
+        cost=costing_params.cf_price,
         escalation=gen_inflation,
     )
 
@@ -297,7 +158,7 @@ def calc_lcot(
     # Add new pipe capex
     pf.add_capital_item(
         name=col_names["new_pipe"],
-        cost=new_pipe_cap,
+        cost=new_pipe_capex,
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -306,7 +167,7 @@ def calc_lcot(
     # Add new compressors
     pf.add_capital_item(
         name=col_names["new_comp"],
-        cost=sum(comp_cost),
+        cost=sum(mod_costing_params.comp_capex),
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -314,7 +175,7 @@ def calc_lcot(
     # Add revamped compressors
     pf.add_capital_item(
         name=col_names["refurb_comp"],
-        cost=sum(revamped_comp_capex),
+        cost=sum(mod_costing_params.revamped_comp_capex),
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -322,7 +183,7 @@ def calc_lcot(
     # Add supply compressors
     pf.add_capital_item(
         name=col_names["supply_comp"],
-        cost=supply_comp_capex,
+        cost=mod_costing_params.supply_comp_capex,
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -330,7 +191,7 @@ def calc_lcot(
     # Add meter & regulator station
     pf.add_capital_item(
         name=col_names["meter"],
-        cost=meter_cost,
+        cost=mod_costing_params.meter_cost,
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -338,7 +199,7 @@ def calc_lcot(
     # Add valve replacement
     pf.add_capital_item(
         name=col_names["valve"],
-        cost=valve_cost,
+        cost=mod_costing_params.valve_cost,
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -346,7 +207,7 @@ def calc_lcot(
     # Add residual value of old network
     pf.add_capital_item(
         name=col_names["orig_network"],
-        cost=original_network_residual_value,
+        cost=costing_params.original_pipeline_cost,
         depr_type="Straight line",
         depr_period=depr_period,
         refurb=[0],
@@ -357,7 +218,7 @@ def calc_lcot(
         name=col_names["ili"],
         usage=1,
         unit="$",
-        cost=ili_costs,
+        cost=mod_costing_params.ili_costs,
         escalation=gen_inflation,
     )
 
@@ -418,13 +279,13 @@ def calc_lcot(
     )
 
     total_capex = {
-        col_names["new_pipe"]: new_pipe_cap,
-        col_names["orig_network"]: original_network_residual_value,
-        col_names["new_comp"]: sum(comp_cost),
-        col_names["refurb_comp"]: sum(revamped_comp_capex),
-        col_names["supply_comp"]: supply_comp_capex,
-        col_names["meter"]: meter_cost,
-        col_names["valve"]: valve_cost,
+        col_names["new_pipe"]: new_pipe_capex,
+        col_names["orig_network"]: costing_params.original_pipeline_cost,
+        col_names["new_comp"]: sum(mod_costing_params.comp_capex),
+        col_names["refurb_comp"]: sum(mod_costing_params.revamped_comp_capex),
+        col_names["supply_comp"]: mod_costing_params.supply_comp_capex,
+        col_names["meter"]: mod_costing_params.meter_cost,
+        col_names["valve"]: mod_costing_params.valve_cost,
     }
 
     capex_sum = sum(total_capex.values())
@@ -439,14 +300,35 @@ def calc_lcot(
             + cap_expense * capex_fraction[i]
         )
 
-    return prices_all
+    # Collect ProFAST inputs to recreate
+    pf_in = {}
+    pf_in["vals"] = {i: v for i, v in pf.vals.items()}
+    pf_in["capital"] = {
+        i: {
+            "cost": v.cost,
+            "depr_type": v.depr_type,
+            "depr_period": v.depr_period,
+            "refurb": v.refurb,
+        }
+        for i, v in pf.capital_items.items()
+    }
+    pf_in["feedstocks"] = {
+        i: {"cost": v.cost, "usage": v.usage, "escalation": v.escalation}
+        for i, v in pf.feedstocks.items()
+    }
+    pf_in["fixed_costs"] = {
+        i: {"cost": v.cost, "escalation": v.escalation}
+        for i, v in pf.fixed_costs.items()
+    }
+
+    return prices_all, pf_in
 
 
 def get_cs_fuel_cost(
     blend: float,
     ng_cost: float,
     h2_cost: float,
-    ng_comp: dict,
+    composition: "Composition",
     json_file: str,
     fin_overrides: dict,
 ) -> float:
@@ -454,14 +336,9 @@ def get_cs_fuel_cost(
     Calculate the compressor fuel cost in $/MMBTU
     """
 
-    # Get pure H2 HHV,GCV
-    pure_h2 = bp_plc.Composition({"H2": 1}, interp=False)
-    H2_energy_HHV = pure_h2.HHV  # MJ/kg
-    GCV_H2_MJpsm3 = pure_h2.get_GCV()
-
-    # Get pure CH4 GCV
-    pure_ch4 = bp_plc.Composition(ng_comp, interp=False)
-    GCV_NG_MJpsm3 = pure_ch4.get_GCV()
+    # Get pure H2, NG  HHV,GCV
+    H2_energy_HHV, GCV_H2_MJpsm3 = composition.pure_h2_hhv_gcv()
+    _, GCV_NG_MJpsm3 = composition.pure_ng_hhv_gcv()
 
     blend_ratio_energy = (blend * GCV_H2_MJpsm3) / (
         (blend * GCV_H2_MJpsm3) + (1 - blend) * GCV_NG_MJpsm3
@@ -671,9 +548,20 @@ def ili_cost(cp: Costing_params, pipe_added: list) -> float:
     ILI costs from tabulated values
     """
 
-    ili_cost = sum([cp.ili_cost[dn] * length for dn, length in pipe_added])
+    ili_cost = sum(
+        [ili_check_interp(cp=cp, dn=dn) * length for dn, length in pipe_added]
+    )
 
     return ili_cost / cp.ili_interval
+
+
+def ili_check_interp(cp: Costing_params, dn: int) -> float:
+    if dn not in cp.ili_cost:
+        dns = np.array(list(cp.ili_cost.keys()))
+        mask = dns > dn
+        index = np.argmin(abs(dns[mask] - dn))
+        return cp.ili_cost[dns[mask][index]]
+    return cp.ili_cost[dn]
 
 
 def ili_costs_file(valve_cost_file: str) -> dict:
@@ -731,7 +619,20 @@ def valve_replacement_cost(
     ref_data = cp.valve_cost[v_type]
 
     valve_cost = sum(
-        [np.floor(length / spacing) * ref_data[dn] for dn, length in pipe_added]
+        [
+            np.floor(length / spacing)
+            * valve_cost_check_interp(ref_data=ref_data, dn=dn)
+            for dn, length in pipe_added
+        ]
     )
 
     return valve_cost
+
+
+def valve_cost_check_interp(ref_data: dict[int, float], dn: int) -> float:
+    if dn not in ref_data:
+        dns = np.array(list(ref_data.keys()))
+        mask = dns > dn
+        index = np.argmin(abs(dns[mask] - dn))
+        return ref_data[dns[mask][index]]
+    return ref_data[dn]

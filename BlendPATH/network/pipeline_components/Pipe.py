@@ -1,107 +1,53 @@
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from enum import IntEnum
+from typing import TYPE_CHECKING, Union
 
 import cantera as ct
 import numpy as np
+import numpy.typing as npt
 
 import BlendPATH.Global as gl
-import BlendPATH.util.pipe_assessment as bp_pa
-from BlendPATH.util.schedules import SCHEDULES
+from BlendPATH.network.pipeline_components import friction_factor
 
 from . import cantera_util as ctu
-from . import eos
 
 if TYPE_CHECKING:
     from .Node import Node
 
 
-@dataclass
 class Pipe:
     """
     A pipe that connects two nodes
     """
 
-    from_node: "Node"
-    to_node: "Node"
-    name: str = ""
-    diameter_mm: float = 0
-    length_km: float = 0
-    roughness_mm: float = 0.012
-    thickness_mm: float = 0
-    grade: str = ""
-    p_max_mpa_g: float = 0
-    m_dot: float = None
-    thermo_curvefit: bool = False
-
-    def __post_init__(self) -> None:
-        self.diameter_out_mm = self.diameter_mm + 2 * self.thickness_mm
-        self.A_m2 = (self.diameter_mm * gl.MM2M) ** 2 / 4 * np.pi
-        self.assign_DN()
-        self.assign_sch()
-
-    def assign_DN(self) -> None:
-        """
-        Determine the DN of the pipe based on the SCHEDULE table
-        """
-        outer_diam_list = SCHEDULES["Outer diameter [mm]"].values
-        dn_list = SCHEDULES["DN"].values
-        self.DN = float(
-            dn_list[np.digitize(self.diameter_out_mm, outer_diam_list, right=True)]
-        )
-
-    def assign_sch(self) -> None:
-        """
-        Return the schedule based on the DN and lookup in SCHEDULES table
-        """
-        offset = 2
-        sch_row = SCHEDULES.loc[SCHEDULES["DN"] == self.DN].values[0]
-        sch_row = sch_row[offset:]
-        sch_ind = np.nanargmin(abs(sch_row - self.thickness_mm))
-        self.schedule = SCHEDULES.columns.values[sch_ind + offset]
-
-    def pipe_assessment(
+    def __init__(
         self,
-        design_option: str = "b",
-        location_class: int = 1,
-        joint_factor: float = 1,
-        T_derating_factor: float = 1,
-    ) -> None:
-        """
-        Reassign the ASME B31.12 design pressure
-        """
-        self.SMYS, self.SMTS = bp_pa.get_SMYS_SMTS(self.grade)
-        self.pressure_ASME_MPa = self.design_pressure_ASME(
-            design_option=design_option,
-            location_class=location_class,
-            joint_factor=joint_factor,
-            T_derating_factor=T_derating_factor,
-        )
-
-    def design_pressure_ASME(
-        self,
-        design_option: str,
-        location_class: int,
-        joint_factor: int,
-        T_derating_factor: int,
-    ) -> float:
-        """
-        Calculates the ASME B31.12 design pressure
-        """
-        design_factor = bp_pa.get_design_factor(
-            design_option=design_option, location_class=location_class
-        )
-        pressure_ASME_MPa = bp_pa.get_design_pressure_ASME(
-            design_p_MPa=self.p_max_mpa_g,
-            design_option=design_option,
-            SMYS=self.SMYS,
-            SMTS=self.SMTS,
-            t=self.thickness_mm,
-            D=self.DN,
-            F=design_factor,
-            E=joint_factor,
-            T=T_derating_factor,
-        )
-        return pressure_ASME_MPa
+        from_node: "Node",
+        to_node: "Node",
+        name: str = "",
+        diameter_mm: float = 0,
+        length_km: float = 0,
+        roughness_mm: float = 0.012,
+        thickness_mm: float = 0,
+        rating_code: str = "",
+        p_max_mpa_g: float = 0,
+        ff_type: friction_factor.FF_TYPES = "hofer",
+        grade: str | None = None,
+        material: str | None = None,
+    ):
+        self.from_node = from_node
+        self.to_node = to_node
+        self.name = name
+        self.diameter_mm = diameter_mm
+        self.length_km = length_km
+        self.roughness_mm = roughness_mm
+        self.thickness_mm = thickness_mm
+        self.rating_code = rating_code
+        self.p_max_mpa_g = p_max_mpa_g
+        self.m_dot = None
+        self.ff_type = ff_type
+        self.grade = grade
+        self._parent_pipe = None
+        self.material = material
 
     def get_derivative(self, coef: float, p_eqn: float) -> float:
         """
@@ -116,16 +62,20 @@ class Pipe:
         Get the mass flow rate through the pipe
         """
         C_p_eqn = coef * p_eqn**0.5
-        direction = self.get_direction()
-        self.m_dot = C_p_eqn * direction
+        self.m_dot = C_p_eqn * self.direction
         return self.m_dot
 
     def get_d_and_mdot(
-        self, rho_avg: float, z_avg: float, mu: float, eos_type: eos._EOS_OPTIONS
+        self,
+        rho_avg: float,
+        z_avg: float,
+        mu: float,
+        mw: float,
     ) -> tuple:
-
         # Call flow eqn
-        coef, p_eqn = self.get_flow_eqn_const(rho_avg, z_avg, mu, eos_type=eos_type)
+        coef, p_eqn = self.get_flow_eqn_const(
+            rho_avg=rho_avg, z_avg=z_avg, mu=mu, mw=mw
+        )
 
         # get derivative term
         C_p_eqn_deriv = self.get_derivative(coef=coef, p_eqn=p_eqn)
@@ -136,61 +86,72 @@ class Pipe:
         return C_p_eqn_deriv, mdot
 
     def get_flow_eqn_const(
-        self, rho_avg: float, z_avg: float, mu: float, eos_type: eos._EOS_OPTIONS = "rk"
+        self,
+        rho_avg: float,
+        z_avg: float,
+        mu: float,
+        mw: float,
     ) -> float:
         """
         Calculate momentum equation coefficient
         """
         p_in = self.from_node.pressure + ct.one_atm
         p_out = self.to_node.pressure + ct.one_atm
+        if p_in < p_out:
+            p_in, p_out = p_out, p_in
 
         A = self.A_m2
-        mw = self.from_node.mw
-        T = gl.T_FIXED
         D = self.diameter_mm * gl.MM2M
         L = self.length_km * gl.KM2M
-
-        if self.thermo_curvefit:
-            # rho_avg, z_avg = self.from_node.X.get_curvefit_rho_z(p_gauge_pa=p_avg)
-            pass
-            # mu = self.from_node.X.get_curvefit_mu(p_gauge_pa=p_avg)
-        else:
-            p_avg = self.get_p_avg()
-            ctu.gas.TPX = T, p_avg + ct.one_atm, self.from_node.X.x_str
-            mu = ctu.gas.viscosity
-            rho_avg, z_avg = eos.get_rz(
-                p_gauge=p_avg, T_K=T, X=self.from_node.X, eos=eos_type, mw=mw
-            )
 
         if self.m_dot is None:
             self.Re = 1e8
         else:
-            v_avg = abs(self.m_dot / rho_avg / self.A_m2)
-            self.Re = rho_avg * v_avg * D / mu
-            self.v_avg = v_avg
-            self.v_from = abs(self.m_dot / self.from_node.rho / self.A_m2)
-            self.v_to = abs(self.m_dot / self.to_node.rho / self.A_m2)
+            m_dot_abs = abs(self.m_dot)
+            self.v_avg = m_dot_abs / rho_avg / A
+            self.Re = rho_avg * self.v_avg * D / mu
+            self.v_from = m_dot_abs / self.from_node.rho / A
+            self.v_to = m_dot_abs / self.to_node.rho / A
 
-        self.f = self.get_friction_factor(self.Re, self.roughness_mm, self.diameter_mm)
+        self.f = friction_factor.get_friction_factor_vector(
+            Re=self.Re,
+            roughness_mm=self.roughness_mm,
+            diameter_mm=self.diameter_mm,
+            ff_type=self.ff_type,
+        )
 
-        coef = A * (mw / z_avg / ctu.R_GAS / T * D / self.f / L) ** (0.5)
+        coef = A * (mw / z_avg / ctu.R_GAS / gl.T_FIXED * D / self.f / L) ** (0.5)
 
-        p_eqn = abs(p_in**2 - p_out**2)
+        p_eqn = p_in**2 - p_out**2
+        if p_eqn < 1e-6:
+            p_eqn = 1e-6
 
         return coef, p_eqn
 
-    def get_p_avg(self) -> float:
+    @property
+    def v_from(self) -> Union[float, None]:
+        return abs(self.m_dot) / self.from_node.rho / self.A_m2
+
+    @property
+    def v_to(self) -> Union[float, None]:
+        return abs(self.m_dot) / self.to_node.rho / self.A_m2
+
+    @property
+    def v_avg(self) -> Union[float, None]:
+        return (self.v_from + self.v_to) / 2
+
+    @property
+    def v_max(self) -> Union[float, None]:
+        return max(self.v_from, self.v_to)
+
+    @property
+    def p_avg(self) -> float:
         p_in = self.from_node.pressure + ct.one_atm
         p_out = self.to_node.pressure + ct.one_atm
         return 2 / 3 * (p_in + p_out - p_in * p_out / (p_in + p_out)) - ct.one_atm
 
-    def get_friction_factor(self, Re: float, RO: float, D: float) -> float:
-        """
-        Use Hofer explicit approximation of Colebrook-White equation for friction factor
-        """
-        return (-2 * np.log10(4.518 / Re * np.log10(Re / 7) + RO / (3.71 * D))) ** (-2)
-
-    def get_direction(self) -> float:
+    @property
+    def direction(self) -> float:
         """
         Return direction of pipe flow
         """
@@ -198,10 +159,17 @@ class Pipe:
             return -1
         return 1
 
-    def get_mach_number(self) -> float:
+    @property
+    def mach_number(self) -> float:
         """
         Calculate mach number
         """
+        if (
+            self.v_from is None
+            or self.from_node.pressure is None
+            or self.to_node.pressure is None
+        ):
+            return 0
         v = [self.v_from, self.v_to]
         c = [
             np.sqrt(x.cpcv * x.pressure / x.rho) for x in [self.from_node, self.to_node]
@@ -209,10 +177,12 @@ class Pipe:
         m = [v[x] / c[x] for x in [0, 1]]
         return max(m)
 
-    def get_erosional_velocity(self) -> float:
+    @property
+    def erosional_velocity_ASME(self) -> float:
         """
         Calculate ASME B31.12 erosional velocity
         """
+
         KG2LB = 2.20462
         M32FT3 = 35.3147
         FT2M = 0.3048
@@ -221,3 +191,156 @@ class Pipe:
         u = 100 / np.sqrt(rho * KG2LB / M32FT3)
         u_m_s = u * FT2M
         return u_m_s  # m/s
+
+    @property
+    def A_m2(self) -> float:
+        return (self.diameter_mm * gl.MM2M) ** 2 / 4 * np.pi
+
+    @property
+    def diameter_out_mm(self) -> float:
+        return self.diameter_mm + 2 * self.thickness_mm
+
+    @property
+    def dimension_ratio(self) -> float:
+        return round(self.diameter_out_mm / self.thickness_mm, 2)
+
+    @property
+    def pressure_MPa(self) -> float:
+        return max(self.from_node.pressure, self.to_node.pressure) / gl.MPA2PA
+
+    @property
+    def Re(self) -> float:
+        if self.m_dot is None or np.isnan(self.m_dot):
+            return 1e8
+        mu_avg = self.to_node.composition.get_mu(p_gauge_pa=self.p_avg, x=self.x_h2)
+        return (np.abs(self.m_dot) / self.A_m2) * self.diameter_mm * gl.MM2M / mu_avg
+
+    @property
+    def f(self) -> float:
+        return friction_factor.get_friction_factor_vector(
+            Re=np.asarray([self.Re]),
+            roughness_mm=np.asarray([self.roughness_mm]),
+            diameter_mm=np.asarray([self.diameter_mm]),
+            ff_type=self.ff_type,
+        )
+
+    @staticmethod
+    def get_flow_eqn_vector(
+        p_in: np.ndarray,
+        p_out: np.ndarray,
+        z_avg: float,
+        mw: float,
+        A: np.ndarray,
+        D: np.ndarray,
+        L: np.ndarray,
+        f: np.ndarray,
+    ) -> tuple:
+        """
+        Calculate momentum equation coefficient
+        """
+        coef = A * (mw / z_avg / ctu.R_GAS / gl.T_FIXED * D / f / L) ** (0.5)
+
+        p_eqn = np.maximum(np.abs(p_in**2 - p_out**2), 1e-6)
+
+        return coef, p_eqn
+
+    class STATIC_PROPS(IntEnum):
+        """These read out the index order for get_pipe_static_properties"""
+
+        A_M2 = 0
+        D = 1
+        L = 2
+        Ro = 3
+
+    def get_pipe_static_properties(self):
+        return [
+            self.A_m2,
+            self.diameter_mm * gl.MM2M,
+            self.length_km * gl.KM2M,
+            self.roughness_mm,
+        ]
+
+    class DYN_PROPS(IntEnum):
+        """These read out the index order for get_pipe_dynamic_properties"""
+
+        P_FROM = 0
+        P_TO = 1
+        X_H2 = 2
+        DIR = 3
+
+    def get_pipe_dynamic_properties(self):
+        return [
+            self.from_node.pressure + ct.one_atm,
+            self.to_node.pressure + ct.one_atm,
+            self.x_h2,
+            self.direction,
+        ]
+
+    @staticmethod
+    def get_Re_vector(
+        m_dot: np.ndarray, a_m2: np.ndarray, d_m: np.ndarray, mu: np.ndarray
+    ):
+        if np.any(np.isnan(m_dot)):
+            return np.full_like(m_dot, 1e8, dtype=float)
+        return np.abs(m_dot) / a_m2 * d_m / mu
+
+    @staticmethod
+    def p_avg_vector(p_in, p_out):
+        return 2 / 3 * (p_in + p_out - p_in * p_out / (p_in + p_out)) - ct.one_atm
+
+    @staticmethod
+    def get_derivative_vector(coef: np.ndarray, p_eqn: np.ndarray) -> np.ndarray:
+        """
+        Calculate the derivative dm/dp for the solver
+        """
+        return coef * p_eqn**-0.5
+
+    @staticmethod
+    def get_mdot_vector(
+        coef: np.ndarray, p_eqn: np.ndarray, direction: np.ndarray
+    ) -> np.ndarray:
+        """
+        Get the mass flow rate through the pipe
+        """
+        C_p_eqn = coef * p_eqn**0.5
+        return C_p_eqn * direction
+
+    @staticmethod
+    def get_jacobian_components(
+        dyn_props: npt.NDArray[np.float64],
+        static_props: npt.NDArray[np.float64],
+        z_avgs: npt.NDArray[np.float64],
+        mw: npt.NDArray[np.float64],
+        mu: npt.NDArray[np.float64],
+        ff_type: bool,
+        m_dot_prev: npt.NDArray[np.float64],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        Re = Pipe.get_Re_vector(
+            m_dot=m_dot_prev,
+            a_m2=static_props[:, Pipe.STATIC_PROPS.A_M2],
+            d_m=static_props[:, Pipe.STATIC_PROPS.D],
+            mu=mu,
+        )
+
+        f = friction_factor.get_friction_factor_vector(
+            Re=Re,
+            roughness_mm=static_props[:, Pipe.STATIC_PROPS.Ro],
+            diameter_mm=static_props[:, Pipe.STATIC_PROPS.D] / gl.MM2M,
+            ff_type=ff_type,
+        )
+
+        coef, p_eqn = Pipe.get_flow_eqn_vector(
+            p_in=dyn_props[:, Pipe.DYN_PROPS.P_FROM],
+            p_out=dyn_props[:, Pipe.DYN_PROPS.P_TO],
+            z_avg=z_avgs,
+            mw=mw,
+            A=static_props[:, Pipe.STATIC_PROPS.A_M2],
+            D=static_props[:, Pipe.STATIC_PROPS.D],
+            L=static_props[:, Pipe.STATIC_PROPS.L],
+            f=f,
+        )
+        dm_dp = Pipe.get_derivative_vector(coef=coef, p_eqn=p_eqn)
+        m_dot_pipe_v = Pipe.get_mdot_vector(
+            coef=coef, p_eqn=p_eqn, direction=dyn_props[:, Pipe.DYN_PROPS.DIR]
+        )
+        return dm_dp, m_dot_pipe_v

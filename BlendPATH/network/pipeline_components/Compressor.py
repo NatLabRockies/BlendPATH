@@ -1,36 +1,42 @@
-from dataclasses import dataclass
-
-import cantera as ct
 import numpy as np
 
 import BlendPATH.costing.costing as bp_cost
 import BlendPATH.Global as gl
 
-from . import cantera_util as ctu
 from .Node import Node
 
 
-@dataclass
 class Compressor:
     """
     Compressor component in pipeline network, raises pressure to outlet pressure
     """
 
-    from_node: Node
-    to_node: Node
-    name: str = ""
-    pressure_out_mpa_g: float = 0
-    fuel_extract: bool = False
-    original_rating_MW: float = 0
-    eta_comp_s: float = 0.78
-    eta_comp_s_elec: float = 0.88
-    eta_driver: float = 0.357
-    eta_driver_elec: float = np.nan
-    eta_driver_elec_calc: float = np.nan
-    eta_driver_elec_used: float = np.nan
-    thermo_curvefit: bool = False
+    def __init__(
+        self,
+        from_node: Node,
+        to_node: Node,
+        name: str = "",
+        pressure_out_mpa_g: float = 0,
+        fuel_extract: bool = False,
+        original_rating_MW: float = 0,
+        eta_comp_s: float = 0.78,
+        eta_comp_s_elec: float = 0.88,
+        eta_driver: float = 0.357,
+        eta_driver_elec: float = np.nan,
+    ):
+        self.from_node = from_node
+        self.to_node = to_node
+        self.name = name
+        self.pressure_out_mpa_g = pressure_out_mpa_g
+        self.fuel_extract = fuel_extract
+        self.original_rating_MW = original_rating_MW
+        self.eta_comp_s = eta_comp_s
+        self.eta_comp_s_elec = eta_comp_s_elec
+        self.eta_driver = eta_driver
+        self.eta_driver_elec = eta_driver_elec
+        self.eta_driver_elec_calc = np.nan
+        self.eta_driver_elec_used = np.nan
 
-    def __post_init__(self):
         self.to_node.pressure = self.pressure_out_mpa_g * gl.MPA2PA
 
     @property

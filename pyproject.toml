@@ -5,25 +5,30 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 exclude = ["user_manual"]
 
+[tool.pytest.ini_options]
+python_files = ["tests/*.py",]
+testpaths = ["tests/*.py",]
+
 [project]
-name = 'BlendPATH_v2'
-description='Blending Pipeline Analysis Tool for Hydrogen v2'
+name = 'BlendPATH'
+description='Blending Pipeline Analysis Tool for Hydrogen'
 authors = [
-    {name="Jamie Kee",email="Jamie.Kee@nrel.gov"},
-    {name="Evan Reznicek",email="Evan.Reznicek@nrel.gov"},
-    {name="Kevin Topolski",email="Kevin.Topolski@nrel.gov"},
+    {name="Jamie Kee",email="Jamie.Kee@nlr.gov"},
+    {name="Evan Reznicek",email="Evan.Reznicek@nlr.gov"},
+    {name="Burcin Cakir Erdener",email="Burcin.CakirErdener@nlr.gov"},
+    {name="Kevin Topolski",email="Kevin.Topolski@nlr.gov"},
 ]
-version = '2.0.6'
+version = '2.1'
 readme = "README.md"
-requires-python  = ">=3.8"
+requires-python  = ">=3.10, <3.14"
 dependencies = [
     "numpy",
     "pandas",
     "cantera",
     "importlib_resources",
-    "openpyxl",
     "scipy",
     "xlsxwriter",
     "ProFAST",
-    "pytest"
+    "pytest",
+    "python_calamine"
 ]

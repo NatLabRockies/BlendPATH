@@ -1,26 +1,43 @@
 import copy
 import itertools
+import logging
 import math
 from collections import namedtuple
+from dataclasses import dataclass
 
 import cantera as ct
 import numpy as np
-from pandas import DataFrame, ExcelWriter
 
 import BlendPATH.costing.costing as bp_cost
+import BlendPATH.costing.pipe_costs.steel_pipe_costs as bp_pipe_cost
+import BlendPATH.file_writing.mod_file_out_util as mod_file_util
 import BlendPATH.Global as gl
+import BlendPATH.modifications.mod_util as bp_mod_util
 import BlendPATH.network.pipeline_components as bp_plc
 import BlendPATH.util.pipe_assessment as bp_pa
 from BlendPATH.network.BlendPATH_network import BlendPATH_network, Design_params
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class compressor_bypass:
+    comp_name: int
+    comp_i: int
+    pipe_changes: list[tuple[str, str, str]]
+    original_from_node: str
+    original_to_node: str
+    comp: bp_plc.Compressor
+    ps: int
+
 
 def direct_replacement(
     network: BlendPATH_network,
-    ASME_params: bp_pa.ASME_consts,
     design_option: str = "b",
     new_filename: str = "modified",
     design_params: Design_params = None,
     costing_params: bp_cost.Costing_params = None,
+    allow_compressor_bypass: bool = False,
 ) -> tuple:
     """
     Modify network with direct replacement method
@@ -28,23 +45,12 @@ def direct_replacement(
 
     max_CR = design_params.max_CR
     final_outlet_pressure = design_params.final_outlet_pressure_mpa_g
-    assign_eta_s = (
-        design_params.new_comp_eta_s_elec
-        if design_params.new_comp_elec
-        else design_params.new_comp_eta_s
-    )
-    assign_eta_driver = (
-        design_params.new_comp_eta_driver_elec
-        if design_params.new_comp_elec
-        else design_params.new_comp_eta_driver
+    assign_eta_s, assign_eta_driver = bp_mod_util.compressor_eta(
+        design_params=design_params
     )
 
-    nw = copy.deepcopy(network)
-
-    for cs in nw.compressors.values():
-        cs.fuel_extract = cs.fuel_extract = (
-            cs.fuel_extract and not design_params.existing_comp_elec
-        )
+    # Copy the network
+    nw = bp_mod_util.copy_network(network=network, design_params=design_params)
 
     # Get size pipesegments
     n_ps = len(nw.pipe_segments)
@@ -54,7 +60,16 @@ def direct_replacement(
     )
     lcot_entry = namedtuple(
         "lcot_entry",
-        ["lcot", "geometry", "cr", "mat_cost", "supply_comp", "supp_p", "combo"],
+        [
+            "lcot",
+            "geometry",
+            "cr",
+            "mat_cost",
+            "supply_comp",
+            "supp_p",
+            "combo",
+            "comp_bypass",
+        ],
     )
 
     cr_max_total = max(max_CR)
@@ -73,7 +88,7 @@ def direct_replacement(
                 # Get all schedules for this combination
                 (th_valid, schedule_valid, pressure_valid) = ps.get_viable_schedules(
                     design_option=design_option,
-                    ASME_params=ASME_params,
+                    ASME_params=design_params.asme,
                     grade=grade,
                     ASME_pressure_flag=False,
                     DN=dn,
@@ -81,11 +96,14 @@ def direct_replacement(
                 )
                 # Loop schedules
                 for th_i, th in enumerate(th_valid):
-                    if not schedule_valid or schedule_valid[th_i] is np.nan:
+                    if (
+                        not schedule_valid
+                        or schedule_valid[th_i] is np.nan
+                        or pressure_valid[th_i] > 20.0
+                    ):
                         continue
 
-                    d_outer_mm = od_options[dn_i]
-                    d_inner_mm = d_outer_mm - 2 * th
+                    d_inner_mm = od_options[dn_i] - 2 * th
 
                     seg_options[ps_i].append(
                         dr_entry(
@@ -115,7 +133,7 @@ def direct_replacement(
     try:
         nw.solve()
         for pipe in ps.pipes:
-            pipe.design_violation = pipe.pressure_MPa > pipe.pressure_ASME_MPa
+            pipe.design_violation = pipe.pressure_MPa > pipe.design_pressure_MPa
             if pipe.design_violation:
                 raise ValueError()
         if nw.pipe_segments[-1].end_node.pressure < final_outlet_pressure * gl.MPA2PA:
@@ -134,6 +152,7 @@ def direct_replacement(
     # Get original values
     og_pipe_vals = []
     og_comps_out = []
+    saved_sol = None
     for ps_i, ps in enumerate(nw.pipe_segments):
         og_pipe_vals.append(
             {
@@ -144,239 +163,256 @@ def direct_replacement(
         )
         og_comps_out.append(ps.comps[0].pressure_out_mpa_g if ps.comps else -1)
 
+    comp_pipe_changes = {}
     if not no_change:
         sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
-        valid_options = list(set.intersection(*map(set, seg_options_slim)))
 
-        for i, design in enumerate(valid_options):
-            for combo in combos:
-                # Update
-                total_length_km = 0
-                for ps_i, ps in enumerate(nw.pipe_segments):
-                    if ps_i in combo:
-                        # Make changes
-                        for pipe in ps.pipes:
-                            pipe.diameter_mm = design.diam_i
-                            pipe.thickness_mm = design.th
-                            pipe.DN = design.dn
-                            pipe.A_m2 = (pipe.diameter_mm * gl.MM2M) ** 2 / 4 * np.pi
-                            total_length_km += pipe.length_km
-                        if ps_i > 0:
-                            if nw.pipe_segments[ps_i - 1].comps:
-                                comp = nw.pipe_segments[ps_i - 1].comps[0]
-                                comp.pressure_out_mpa_g = design.pressure
-                    else:
-                        for pipe in ps.pipes:
-                            pipe.diameter_mm = og_pipe_vals[ps_i]["diameter_mm"]
-                            pipe.thickness_mm = og_pipe_vals[ps_i]["thickness_mm"]
-                            pipe.DN = og_pipe_vals[ps_i]["DN"]
-                            pipe.A_m2 = (pipe.diameter_mm * gl.MM2M) ** 2 / 4 * np.pi
-                        if ps_i > 0:
-                            if nw.pipe_segments[ps_i - 1].comps:
-                                comp = nw.pipe_segments[ps_i - 1].comps[0]
-                                comp.pressure_out_mpa_g = pipe.pressure_ASME_MPa
+        # Get compressor bypass options
+        comp_bypass = bp_mod_util.get_comp_bypass(
+            allow_compressor_bypass=allow_compressor_bypass, nw=nw
+        )
 
-                inlet_pressure = (
-                    design.pressure
-                    if 0 in combo
-                    else nw.pipe_segments[0].pressure_ASME_MPa
-                )
-                supp_p_list = [inlet_pressure]
-                if orig_supply_pressure < inlet_pressure:
-                    supp_p_list = (
-                        [orig_supply_pressure]
-                        + list(
-                            range(
-                                math.ceil(orig_supply_pressure),
-                                math.floor(inlet_pressure),
-                                1,
-                            )
+        # Setup compressor bypass connections
+        comp_pipe_changes = {}
+        for comp_i, comp in enumerate(nw.compressors.values()):
+            comp_pipe_changes[comp.name] = compressor_bypass(
+                comp_name=comp.name,
+                comp_i=comp_i,
+                pipe_changes=[],
+                original_from_node=comp.from_node.name,
+                original_to_node=comp.to_node.name,
+                comp=copy.deepcopy(comp),
+                ps=[i for i, ps in enumerate(nw.pipe_segments) if comp in ps.comps],
+            )
+            for cxn in comp.from_node.connections["Pipe"]:
+                if cxn.to_node == comp.from_node:
+                    comp_pipe_changes[comp.name].pipe_changes.append(("to", cxn.name))
+                elif cxn.from_node == comp.from_node:
+                    comp_pipe_changes[comp.name].pipe_changes.append(("from", cxn.name))
+
+        for bypass_combo in comp_bypass:
+            logger.info(f"Running bypass combo: {bypass_combo}")
+            for comp_value in comp_pipe_changes.values():
+                if comp_value.comp_i in bypass_combo:
+                    logger.info(f"Bypassing compressor {comp_value.comp_name}")
+                    for pipe_changes in comp_value.pipe_changes:
+                        setattr(
+                            nw.pipes[pipe_changes[1]],
+                            f"{pipe_changes[0]}_node",
+                            nw.nodes[comp_value.original_to_node],
                         )
-                        + [inlet_pressure]
+                    # only bypass if needed. Could already be bypassed from pervious iteration
+                    if comp_value.comp_name in nw.compressors:
+                        del nw.compressors[comp_value.comp_name]
+                        del nw.nodes[comp_value.original_from_node]
+                        nw.pipe_segments[comp_value.ps[0]].comps = []
+                else:
+                    nw.compressors[comp_value.comp_name] = comp_value.comp
+                    nw.nodes[comp_value.original_from_node] = comp_value.comp.from_node
+                    nw.compressors[comp_value.comp_name].to_node = nw.nodes[
+                        comp_value.original_to_node
+                    ]
+                    nw.pipe_segments[comp_value.ps[0]].comps = [comp_value.comp]
+
+                    for pipe_changes in comp_value.pipe_changes:
+                        setattr(
+                            nw.pipes[pipe_changes[1]],
+                            f"{pipe_changes[0]}_node",
+                            nw.nodes[comp_value.original_from_node],
+                        )
+
+                nw.assign_nodes()
+                nw.assign_connections()
+
+            for i, design in enumerate(valid_options):
+                for combo in combos:
+                    # Update
+                    total_length_km = 0
+                    for ps_i, ps in enumerate(nw.pipe_segments):
+                        if ps_i in combo:
+                            # Make changes
+                            for pipe in ps.pipes:
+                                pipe.diameter_mm = design.diam_i
+                                pipe.thickness_mm = design.th
+                                pipe.DN = design.dn
+                                total_length_km += pipe.length_km
+                            if ps_i > 0:
+                                if nw.pipe_segments[ps_i - 1].comps:
+                                    comp = nw.pipe_segments[ps_i - 1].comps[0]
+                                    comp.pressure_out_mpa_g = design.pressure
+                        else:
+                            for pipe in ps.pipes:
+                                pipe.diameter_mm = og_pipe_vals[ps_i]["diameter_mm"]
+                                pipe.thickness_mm = og_pipe_vals[ps_i]["thickness_mm"]
+                                pipe.DN = og_pipe_vals[ps_i]["DN"]
+                            if ps_i > 0:
+                                if nw.pipe_segments[ps_i - 1].comps:
+                                    comp = nw.pipe_segments[ps_i - 1].comps[0]
+                                    comp.pressure_out_mpa_g = pipe.design_pressure_MPa
+
+                    inlet_pressure = (
+                        design.pressure
+                        if 0 in combo
+                        else nw.pipe_segments[0].design_pressure_MPa
                     )
-
-                for supp_p in supp_p_list:
-                    if supp_p > orig_supply_pressure:
-                        comp_to_node = sn.node
-                        new_supply_node = bp_plc.Node(
-                            name="new_supply_node_comp",
-                            X=sn.node.X,
-                            pressure=orig_supply_pressure * gl.MPA2PA,
-                        )
-                        supply_comp = bp_plc.Compressor(
-                            name="Supply compressor",
-                            from_node=new_supply_node,
-                            to_node=comp_to_node,
-                            pressure_out_mpa_g=supp_p,
-                            fuel_extract=not design_params.new_comp_elec,
-                        )
-                        sn.node = new_supply_node
-                        nw.compressors["Supply compressor"] = supply_comp
-                        nw.nodes["new_supply_node_comp"] = new_supply_node
-                        nw.assign_node_indices()
-                        nw.assign_ignore_nodes()
-                        nw.assign_connections()
-                    sn.pressure_mpa = min(orig_supply_pressure, supp_p)
-
-                    try:
-                        nw.solve()
-                        all_fuel_MW = 0
-                        elec_kW = 0
-                        comp_capex = []
-                        revamped_comp_capex = []
-                        supply_comp_capex = 0
-                        supply_comp_fuel = {"gas": 0, "elec": 0}
-                        max_cr = []
-                        for comp in nw.compressors.values():
-                            # Check compression ratio
-                            this_cr = comp.compression_ratio
-                            if (this_cr > cr_max_total) and (
-                                comp.name != "Supply compressor"
-                            ):
-                                raise ValueError("Compression ratio")
-                            max_cr.append(comp.compression_ratio)
-
-                            # Get CAPEX of compressors
-                            if comp.name == "Supply compressor":
-                                supply_comp_capex += comp.get_cap_cost(
-                                    cp=costing_params,
-                                    to_electric=design_params.existing_comp_elec,
-                                )
-                                supply_comp_fuel = {
-                                    "gas": comp.fuel_w
-                                    * gl.W2MW
-                                    * gl.MW2MMBTUDAY
-                                    / nw.capacity_MMBTU_day,
-                                    "elec": comp.fuel_electric_W
-                                    / gl.KW2W
-                                    / nw.capacity_MMBTU_day
-                                    * gl.DAY2HR,
-                                }
-                                continue
-
-                            # Add up fuel costs
-                            all_fuel_MW += comp.fuel_w * gl.W2MW
-                            elec_kW += comp.fuel_electric_W / gl.KW2W
-
-                            comp_capex.append(
-                                comp.get_cap_cost(
-                                    cp=costing_params,
-                                    to_electric=design_params.existing_comp_elec,
+                    supp_p_list = [inlet_pressure]
+                    if orig_supply_pressure < inlet_pressure:
+                        supp_p_list = (
+                            [orig_supply_pressure]
+                            + list(
+                                range(
+                                    math.ceil(orig_supply_pressure),
+                                    math.floor(inlet_pressure),
+                                    1,
                                 )
                             )
-                            revamped_comp_capex.append(
-                                comp.get_cap_cost(
-                                    cp=costing_params,
-                                    revamp=True,
-                                    to_electric=design_params.existing_comp_elec,
-                                )
+                            + [inlet_pressure]
+                        )
+
+                    skip_future_p_supply = False
+                    for supp_p in supp_p_list:
+                        if skip_future_p_supply:
+                            continue
+                        if supp_p > orig_supply_pressure:
+                            comp_to_node = sn.node
+                            new_supply_node = bp_plc.Node(
+                                name="new_supply_node_comp",
+                                x_h2=sn.blend,
+                                composition=sn.node.composition,
+                                pressure=orig_supply_pressure * gl.MPA2PA,
+                                is_supply=True,
                             )
-
-                        if (
-                            nw.pipe_segments[-1].end_node.pressure
-                            < final_outlet_pressure * gl.MPA2PA
-                        ):
-                            raise ValueError("Final outlet pressure")
-
-                        d_inner_mm = design.diam_i
-                        d_outer_mm = d_inner_mm + 2 * design.th
-
-                        cost = bp_cost.get_pipe_material_cost(
-                            cp=costing_params,
-                            di_mm=d_inner_mm,
-                            do_mm=d_outer_mm,
-                            l_km=total_length_km,
-                            grade=design.grade,
-                        )
-
-                        anl_cap = bp_cost.get_pipe_other_cost(
-                            cp=costing_params,
-                            d_mm=design.dn,
-                            l_km=total_length_km,
-                            anl_types=["Labor", "Misc"],
-                        )
-
-                        new_pipe_cap = cost + sum(anl_cap.values())
-
-                        all_pipes_len = []
-                        pipe_dns_lens = {}
-                        for pipe in nw.pipes.values():
-                            if pipe.DN in pipe_dns_lens.keys():
-                                pipe_dns_lens[pipe.DN] += pipe.length_km
-                            else:
-                                pipe_dns_lens[pipe.DN] = pipe.length_km
-                        all_pipes_len = [
-                            (dn, length) for dn, length in pipe_dns_lens.items()
-                        ]
-
-                        # Get all demands
-                        demands_MW = [
-                            demand.flowrate_MW for demand in nw.demand_nodes.values()
-                        ]
-
-                        # Get meter,ILI,valve costs
-                        meter_cost = bp_cost.meter_reg_station_cost(
-                            costing_params, demands_MW
-                        )
-                        ili_costs = bp_cost.ili_cost(costing_params, all_pipes_len)
-                        valve_cost = bp_cost.valve_replacement_cost(
-                            costing_params, all_pipes_len, ASME_params.location_class
-                        )
-
-                        price_breakdown = bp_cost.calc_lcot(
-                            json_file=costing_params.casestudy_name,
-                            capacity=nw.capacity_MMBTU_day,
-                            new_pipe_cap=new_pipe_cap,
-                            comp_cost=comp_capex,
-                            revamped_comp_capex=revamped_comp_capex,
-                            supply_comp_capex=supply_comp_capex,
-                            compressor_fuel=all_fuel_MW
-                            * gl.MW2MMBTUDAY
-                            / nw.capacity_MMBTU_day,
-                            compressor_fuel_elec=elec_kW
-                            / nw.capacity_MMBTU_day
-                            * gl.DAY2HR,
-                            supply_comp_fuel=supply_comp_fuel,
-                            cs_cost=costing_params.cf_price,
-                            elec_cost=costing_params.elec_price,
-                            meter_cost=meter_cost,
-                            ili_costs=ili_costs,
-                            valve_cost=valve_cost,
-                            original_network_residual_value=costing_params.original_pipeline_cost,
-                            financial_overrides=costing_params.financial_overrides,
-                        )
-
-                        lcot = price_breakdown["LCOT: Levelized cost of transport"]
-                        lcot_vals.append(
-                            lcot_entry(
-                                lcot,
-                                design,
-                                max(max_cr) if max_cr else np.nan,
-                                cost,
-                                "Supply compressor" in nw.compressors.keys(),
-                                supp_p=supp_p,
-                                combo=combo,
+                            supply_comp = bp_plc.Compressor(
+                                name="Supply compressor",
+                                from_node=new_supply_node,
+                                to_node=comp_to_node,
+                                pressure_out_mpa_g=supp_p,
+                                fuel_extract=not design_params.new_comp_elec,
                             )
-                        )
-                    except (ValueError, ct.CanteraError):
-                        pass
-                    finally:
-                        # reset supply node and compressor if needed
-                        if "Supply compressor" in nw.compressors.keys():
-                            sn_node = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
-                            sn_node.node = sn_orig_node
-                            sn_node.pressure = network.supply_nodes[
-                                list(network.supply_nodes.keys())[0]
-                            ].pressure_mpa
-                            nw.compressors.pop("Supply compressor")
-                            nw.nodes.pop("new_supply_node_comp")
-                            nw.assign_node_indices()
-                            nw.assign_ignore_nodes()
+                            sn.node = new_supply_node
+                            nw.compressors["Supply compressor"] = supply_comp
+                            nw.nodes["new_supply_node_comp"] = new_supply_node
+                            nw.assign_nodes()
                             nw.assign_connections()
+                        sn.pressure_mpa = min(orig_supply_pressure, supp_p)
 
-        ######################################
+                        try:
+                            for comp_check in nw.compressors.values():
+                                if comp_check.pressure_out_mpa_g > 20.0:
+                                    skip_future_p_supply = True
+                                    raise ValueError(
+                                        "Compressor pressure out of bounds"
+                                    )
+                            nw.solve(initializer=0 if saved_sol is None else saved_sol)
+                            max_cr = []
+                            for comp in nw.compressors.values():
+                                # Check compression ratio
+                                this_cr = comp.compression_ratio
+                                if (this_cr > cr_max_total) and (
+                                    comp.name != "Supply compressor"
+                                ):
+                                    raise ValueError("Compression ratio")
+                                max_cr.append(comp.compression_ratio)
+
+                            if (
+                                nw.pipe_segments[-1].end_node.pressure
+                                < final_outlet_pressure * gl.MPA2PA
+                            ):
+                                raise ValueError("Final outlet pressure")
+
+                            for this_ps_i, this_ps in enumerate(nw.pipe_segments):
+                                for this_pipe in this_ps.pipes:
+                                    check_pressure = this_pipe.design_pressure_MPa
+                                    if this_ps_i in combo:
+                                        check_pressure = design.pressure
+                                    if this_pipe.pressure_MPa > check_pressure:
+                                        skip_future_p_supply = True
+                                        raise ValueError("Pressure rating")
+
+                            # Get new pipe capex
+                            cost = bp_pipe_cost.get_pipe_material_cost(
+                                cp=costing_params,
+                                di_mm=design.diam_i,
+                                do_mm=design.diam_i + 2 * design.th,
+                                l_km=total_length_km,
+                                grade=design.grade,
+                            )
+
+                            anl_cap = bp_pipe_cost.get_pipe_other_cost(
+                                cp=costing_params,
+                                d_mm=design.dn,
+                                l_km=total_length_km,
+                                anl_types=bp_mod_util.get_pipe_cost_types(
+                                    mod_type="dr", scenario_type=network.scenario_type
+                                ),
+                            )
+
+                            new_pipe_cap = cost + sum(anl_cap.values())
+
+                            mod_costing_params = bp_mod_util.get_mod_costing_params(
+                                network=nw,
+                                design_params=design_params,
+                                costing_params=costing_params,
+                                supply_comp_inputs=None,
+                            )
+
+                            price_breakdown, _ = bp_cost.calc_lcot(
+                                mod_costing_params=mod_costing_params,
+                                new_pipe_capex=new_pipe_cap,
+                                costing_params=costing_params,
+                            )
+
+                            lcot = price_breakdown["LCOT: Levelized cost of transport"]
+                            lcot_vals.append(
+                                lcot_entry(
+                                    lcot,
+                                    design,
+                                    max(max_cr) if max_cr else np.nan,
+                                    cost,
+                                    "Supply compressor" in nw.compressors.keys(),
+                                    supp_p=supp_p,
+                                    combo=combo,
+                                    comp_bypass=bypass_combo,
+                                )
+                            )
+
+                            if saved_sol is None:
+                                saved_sol = nw.pressure_init_out
+
+                        except (ValueError, ct.CanteraError, RuntimeError):
+                            pass
+                        finally:
+                            # reset supply node and compressor if needed
+                            if "Supply compressor" in nw.compressors.keys():
+                                sn_node = nw.supply_nodes[
+                                    list(nw.supply_nodes.keys())[0]
+                                ]
+                                sn_node.node = sn_orig_node
+                                sn_node.pressure = network.supply_nodes[
+                                    list(network.supply_nodes.keys())[0]
+                                ].pressure_mpa
+                                nw.compressors.pop("Supply compressor")
+                                nw.nodes.pop("new_supply_node_comp")
+                                nw.assign_nodes()
+                                nw.assign_connections()
+
+            ######################################
+
+    # Reset compressors
+    for comp_value in comp_pipe_changes.values():
+        nw.compressors[comp_value.comp_name] = comp_value.comp
+        nw.nodes[comp_value.original_from_node] = comp_value.comp.from_node
+        nw.compressors[comp_value.comp_name].to_node = nw.nodes[
+            comp_value.original_to_node
+        ]
+        nw.pipe_segments[comp_value.ps[0]].comps = [comp_value.comp]
+    nw.assign_nodes()
+    nw.assign_connections()
 
     add_supply_comp = False
+    combo_final = None
+    min_geom = None
+    supp_p = None
     if valid_options and not no_change:
         lcot_list = [x.lcot for x in lcot_vals]
         min_lcot_ind = lcot_list.index(min(lcot_list))
@@ -436,7 +472,7 @@ def direct_replacement(
             "grade",
             "length",
             "mat_cost",
-            "anl_costs",
+            "other_pipe_cost",
             "total cost",
         ]
     }
@@ -445,103 +481,95 @@ def direct_replacement(
             continue
         mincost_i = min(val["costs"])
         mincost_ind = val["costs"].index(mincost_i)
-        min_cost[pipe] = {x: v[mincost_ind] for x, v in val.items()}
+        # min_cost[pipe] = {x: v[mincost_ind] for x, v in val.items()}
+
+        min_cost[pipe] = bp_mod_util.New_pipes(
+            grade=val["grades"][mincost_ind],
+            cost=val["costs"][mincost_ind],
+            th=val["ths"][mincost_ind],
+            schedule=val["schedules"][mincost_ind],
+            pressure=val["pressures"][mincost_ind],
+            inner_diameter=val["inner diameters"][mincost_ind],
+            dn=val["DN"][mincost_ind],
+            length=val["lengths"][mincost_ind],
+            ps=val["ps"][mincost_ind],
+            name=val["name"][mincost_ind],
+        )
 
         # Combine by DN,sch,grade
-        combined_ind = f"{min_cost[pipe]['DN']};;{min_cost[pipe]['schedules']};;{min_cost[pipe]['grades']}"
-        min_cost[pipe]["D_S_G"] = combined_ind
+        combined_ind = min_cost[pipe].D_S_G
         # If the same DN, sch, and grade, combo exists, then add to the length and cost
         # Otherwise make a new entry
         if combined_ind in combined_pipe["D_S_G"]:
             dsg_ind = combined_pipe["D_S_G"].index(combined_ind)
-            combined_pipe["length"][dsg_ind] += min_cost[pipe]["lengths"]
-            combined_pipe["mat_cost"][dsg_ind] += min_cost[pipe]["costs"]
+            combined_pipe["length"][dsg_ind] += min_cost[pipe].length
+            combined_pipe["mat_cost"][dsg_ind] += min_cost[pipe].cost
         else:
-            combined_pipe["DN"].append(min_cost[pipe]["DN"])
-            combined_pipe["sch"].append(min_cost[pipe]["schedules"])
-            combined_pipe["grade"].append(min_cost[pipe]["grades"])
+            combined_pipe["DN"].append(min_cost[pipe].dn)
+            combined_pipe["sch"].append(min_cost[pipe].schedule)
+            combined_pipe["grade"].append(min_cost[pipe].grade)
             combined_pipe["D_S_G"].append(combined_ind)
-            combined_pipe["length"].append(min_cost[pipe]["lengths"])
-            combined_pipe["mat_cost"].append(min_cost[pipe]["costs"])
+            combined_pipe["length"].append(min_cost[pipe].length)
+            combined_pipe["mat_cost"].append(min_cost[pipe].cost)
     # Temporary fix for setting total material cost
     if combined_pipe["mat_cost"]:
         combined_pipe["mat_cost"][-1] = lcot_vals[min_lcot_ind].mat_cost
 
     # Remake file
 
-    # Make new pipes sheet
-    col_names = [
-        "pipe_name",
-        "from_node",
-        "to_node",
-        "diameter_mm",
-        "length_km",
-        "roughness_mm",
-        "thickness_mm",
-        "steel_grade",
-    ]
-    new_pipes = {x: [] for x in col_names}
-    for pipe in network.pipes.values():
+    make_result_file(
+        filename=new_filename,
+        network=network,
+        nw=nw,
+        min_cost=min_cost,
+        no_change=no_change,
+        combo_final=combo_final,
+        min_geom=min_geom,
+        supp_p=supp_p,
+        add_supply_comp=add_supply_comp,
+        design_params=design_params,
+        assign_eta_s=assign_eta_s,
+        assign_eta_driver=assign_eta_driver,
+        compressor_bypass=lcot_vals[min_lcot_ind].comp_bypass if lcot_vals else (),
+    )
 
-        # These values don't change from DR method
-        new_pipes["pipe_name"].append(pipe.name)
-        new_pipes["from_node"].append(pipe.from_node.name)
-        new_pipes["to_node"].append(pipe.to_node.name)
-        new_pipes["length_km"].append(pipe.length_km)
-        new_pipes["roughness_mm"].append(pipe.roughness_mm)
+    return min_cost, combined_pipe, []
 
-        # These values update
-        repd = pipe.name in min_cost.keys()
-        inner_diam = (
-            min_cost[pipe.name]["inner diameters"] if repd else pipe.diameter_mm
-        )
-        thickness = min_cost[pipe.name]["ths"] if repd else pipe.thickness_mm
-        grade = min_cost[pipe.name]["grades"] if repd else pipe.grade
-        new_pipes["diameter_mm"].append(inner_diam)
-        new_pipes["thickness_mm"].append(thickness)
-        new_pipes["steel_grade"].append(grade)
 
-    # Make new nodes sheet
-    col_names = ["node_name", "p_max_mpa_g"]
-    new_nodes = {x: [] for x in col_names}
-    for node in network.nodes.values():
-        new_nodes["node_name"].append(node.name)
-        p_max = np.inf
-        for pipe in node.connections["Pipe"]:
-            min_cost_val = (
-                min_cost[pipe.name]["pressures"]
-                if pipe.name in min_cost.keys()
-                else pipe.pressure_ASME_MPa
-            )
-            p_max = min(p_max, min_cost_val)
-        new_nodes["p_max_mpa_g"].append(p_max)
+def make_result_file(
+    filename: str,
+    network: BlendPATH_network,
+    nw: BlendPATH_network,
+    min_cost: dict,
+    no_change: bool,
+    combo_final: tuple,
+    min_geom: tuple,
+    supp_p: float,
+    add_supply_comp: bool,
+    design_params: Design_params,
+    assign_eta_s: float,
+    assign_eta_driver: float,
+    compressor_bypass: tuple,
+):
 
+    # Compressors
     # Make new compressors
-    col_names = [
-        "compressor_name",
-        "from_node",
-        "to_node",
-        "pressure_out_mpa_g",
-        "rating_MW",
-        "extract_fuel",
-        "eta_s",
-        "eta_driver",
-    ]
-    new_comps = {x: [] for x in col_names}
-    for comp in nw.compressors.values():
+    bypass_swaps = {}
+    new_comps = {x: [] for x in mod_file_util.comps_cols()}
+    for comp_i, comp in enumerate(nw.compressors.values()):
+        if comp_i in compressor_bypass:
+            bypass_swaps[comp.from_node.name] = comp.to_node.name
+            continue
+        fuel_extract = comp.fuel_extract and not design_params.existing_comp_elec
         new_comps["compressor_name"].append(comp.name)
         new_comps["from_node"].append(comp.from_node.name)
         new_comps["to_node"].append(comp.to_node.name)
         new_comps["rating_MW"].append(comp.original_rating_MW)
-        new_comps["extract_fuel"].append(comp.fuel_extract)
+        new_comps["extract_fuel"].append(fuel_extract)
         new_comps["eta_s"].append(
-            comp.eta_comp_s if comp.fuel_extract else comp.eta_comp_s_elec
+            comp.eta_comp_s if fuel_extract else comp.eta_comp_s_elec
         )
-        new_comps["eta_driver"].append(
-            comp.eta_driver
-            if comp.fuel_extract
-            else np.nan  # comp.eta_driver_elec_used
-        )
+        new_comps["eta_driver"].append(comp.eta_driver if fuel_extract else "")
 
         # Assume to node has to be the outlet pressure
         for pipe in comp.to_node.connections["Pipe"]:
@@ -551,42 +579,65 @@ def direct_replacement(
                         if ps_i > 0 and nw.pipe_segments[ps_i - 1].comps:
                             p_max = min_geom.pressure
                     else:
-                        p_max = ps.pressure_ASME_MPa
-
-        # p_max = np.inf
-        # for pipe in comp.to_node.connections["Pipe"]:
-        #     min_cost_val = (
-        #         min_cost[pipe.name]["pressures"]
-        #         if pipe.name in min_cost.keys()
-        #         else (
-        #             min_geom.pressure if not no_change else pipe.pipe.pressure_ASME_MPa
-        #         )
-        #     )
-        #     p_max = min(p_max, min_cost_val)
+                        p_max = ps.design_pressure_MPa
 
         new_comps["pressure_out_mpa_g"].append(p_max)
 
+    # Pipes
+    new_pipes = {x: [] for x in mod_file_util.pipes_cols()}
+
+    for pipe in network.parent_pipes.values():
+        # These values don't change from DR method
+        new_pipes["pipe_name"].append(pipe.name)
+        new_pipes["from_node"].append(
+            pipe.from_node.name
+            if pipe.from_node.name not in bypass_swaps
+            else bypass_swaps[pipe.from_node.name]
+        )
+
+        new_pipes["to_node"].append(
+            pipe.to_node.name
+            if pipe.to_node.name not in bypass_swaps
+            else bypass_swaps[pipe.to_node.name]
+        )
+        new_pipes["length_km"].append(pipe.length_km)
+        new_pipes["roughness_mm"].append(pipe.roughness_mm)
+        # These values update
+        repd = pipe.name in min_cost.keys()
+        inner_diam = min_cost[pipe.name].inner_diameter if repd else pipe.diameter_mm
+        thickness = min_cost[pipe.name].th if repd else pipe.thickness_mm
+        grade = min_cost[pipe.name].grade if repd else pipe.grade
+        new_pipes["diameter_mm"].append(inner_diam)
+        new_pipes["thickness_mm"].append(thickness)
+        new_pipes["rating_code"].append(grade)
+
+    # Nodes
+    # Make new nodes sheet
+    new_nodes = {x: [] for x in mod_file_util.nodes_cols()}
+    for node in network.nodes.values():
+        if not node._report_out or node.name in bypass_swaps:
+            continue
+        new_nodes["node_name"].append(node.name)
+        p_max = np.inf
+        for pipe in node.connections["Pipe"]:
+            min_cost_val = (
+                min_cost[pipe.name].pressure
+                if pipe.name in min_cost.keys()
+                else pipe.design_pressure_MPa
+            )
+            p_max = min(p_max, min_cost_val)
+        new_nodes["p_max_mpa_g"].append(p_max)
+
     # Make new supply
-    col_names = ["supply_name", "node_name", "pressure_mpa_g", "flowrate_MW"]
-    new_supply = {x: [] for x in col_names}
+    new_supply = {x: [] for x in mod_file_util.supply_cols()}
     for supply in network.supply_nodes.values():
         new_supply["supply_name"].append(supply.name)
         new_supply["node_name"].append(supply.node.name)
-
-        # Assume to node has to be the outlet pressure
-        # p_max = np.inf
-        # for pipe in supply.node.connections["Pipe"]:
-        #     min_cost_val = (
-        #         min_cost[pipe.name]["pressures"]
-        #         if pipe.name in min_cost.keys()
-        #         else pipe.pressure_ASME_MPa
-        #     )
-        #     p_max = min(p_max, min_cost_val)
-
         new_supply["pressure_mpa_g"].append(
             supp_p if not no_change else supply.pressure_mpa
         )
         new_supply["flowrate_MW"].append("")
+        new_supply["blend"].append(nw.composition.x["H2"])
 
     if add_supply_comp:
         sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
@@ -598,13 +649,15 @@ def direct_replacement(
         new_comps["rating_MW"].insert(0, 0)
         new_comps["extract_fuel"].insert(0, not design_params.new_comp_elec)
         new_comps["eta_s"].insert(0, assign_eta_s)
-        new_comps["eta_driver"].insert(0, assign_eta_driver)
+        new_comps["eta_driver"].insert(
+            0, "" if np.isnan(assign_eta_driver) else assign_eta_driver
+        )
         p_max = np.inf
         for pipe in sn.node.connections["Pipe"]:
             min_cost_val = (
-                min_cost[pipe.name]["pressures"]
+                min_cost[pipe.name].pressure
                 if pipe.name in min_cost.keys()
-                else pipe.pressure_ASME_MPa
+                else pipe.design_pressure_MPa
             )
             p_max = min(p_max, min_cost_val)
         new_comps["pressure_out_mpa_g"].insert(0, supp_p)
@@ -616,35 +669,27 @@ def direct_replacement(
         # Update supply node
         new_supply["node_name"][-1] = "Supply compressor from_node"
         new_supply["pressure_mpa_g"][-1] = supply.pressure_mpa
+        new_supply["blend"][-1] = nw.composition.x["H2"]
 
     # Make new demands
-    col_names = ["demand_name", "node_name", "flowrate_MW"]
-    new_demand = {x: [] for x in col_names}
+    new_demand = {x: [] for x in mod_file_util.demand_cols()}
     for demand in network.demand_nodes.values():
         new_demand["demand_name"].append(demand.name)
         new_demand["node_name"].append(demand.node.name)
         new_demand["flowrate_MW"].append(demand.flowrate_MW)
 
     # Make new composition
-    col_names = ["SPECIES", "X"]
-    new_composition = {x: [] for x in col_names}
+    new_composition = {x: [] for x in mod_file_util.composition_cols()}
     for species, x in network.composition.x.items():
         new_composition["SPECIES"].append(species)
         new_composition["X"].append(x)
 
-    new_pipes = DataFrame(new_pipes)
-    new_nodes = DataFrame(new_nodes)
-    new_comps = DataFrame(new_comps)
-    new_supply = DataFrame(new_supply)
-    new_demand = DataFrame(new_demand)
-    new_composition = DataFrame(new_composition)
-
-    with ExcelWriter(new_filename) as writer:
-        new_pipes.to_excel(writer, sheet_name="PIPES", index=False)
-        new_nodes.to_excel(writer, sheet_name="NODES", index=False)
-        new_comps.to_excel(writer, sheet_name="COMPRESSORS", index=False)
-        new_supply.to_excel(writer, sheet_name="SUPPLY", index=False)
-        new_demand.to_excel(writer, sheet_name="DEMAND", index=False)
-        new_composition.to_excel(writer, sheet_name="COMPOSITION", index=False)
-
-    return min_cost, combined_pipe
+    mod_file_util.write_to_network_file(
+        filename=filename,
+        new_pipes=new_pipes,
+        new_nodes=new_nodes,
+        new_comps=new_comps,
+        new_supply=new_supply,
+        new_demand=new_demand,
+        new_composition=new_composition,
+    )

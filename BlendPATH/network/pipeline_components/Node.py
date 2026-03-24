@@ -1,75 +1,114 @@
-from dataclasses import dataclass, field
-
-import cantera as ct
-
-import BlendPATH.Global as gl
-
-from . import Composition, Compressor, Pipe, eos
-from . import cantera_util as ctu
+from BlendPATH.network import pipeline_components as bp_plc
+from BlendPATH.network.pipeline_components.eos import _EOS_OPTIONS
 
 
-@dataclass
 class Node:
     """
     Nodes in a network. Must be connected to pipes or compressors. Can be a supply or demand as well.
     """
 
-    name: str = ""
-    p_max_mpa_g: float = 0
-    index: int = 0
-    pressure: float = None
-    X: float = "CH4:1"
-    connections: dict = field(default_factory=lambda: {"Pipe": [], "Comp": []})
-    is_demand: bool = False
-    thermo_curvefit: bool = False
+    def __init__(
+        self,
+        name: str = "",
+        p_max_mpa_g: float = 0,
+        index: int = 0,
+        pressure: float = None,
+        composition: bp_plc.Composition = None,
+        x_h2: float = 0.0,
+        is_demand: bool = False,
+        is_supply: bool = False,
+        eos_type: _EOS_OPTIONS = None,
+        _report_out: bool = True,
+        plot_xy: tuple = None,
+    ):
+        self.name = name
+        self.p_max_mpa_g = p_max_mpa_g
+        self.index = index
+        self.pressure = pressure
+        self.composition = composition
+        self.x_h2 = x_h2
+        self.connections = {"Pipe": [], "Comp": [], "Reg": []}
+        self.is_demand = is_demand
+        self.is_supply = is_supply
+        self.eos_type = eos_type
+        self._report_out = _report_out
+        self.plot_xy = plot_xy
 
     def clear_connections(self) -> None:
         """
         Function to clear out connections
         """
-        self.connections = {"Pipe": [], "Comp": []}
+        self.connections = {"Pipe": [], "Comp": [], "Reg": []}
 
     def add_connection(self, cxn) -> None:
         """
         Add pipe or compressor cxn to node
         """
-        if isinstance(cxn, Pipe.Pipe):
+        if isinstance(cxn, (bp_plc.Pipe, bp_plc.Steel_pipe)):
             self.connections["Pipe"].append(cxn)
-        elif isinstance(cxn, Compressor.Compressor):
+        elif isinstance(cxn, bp_plc.Compressor):
             self.connections["Comp"].append(cxn)
+        elif isinstance(cxn, bp_plc.Regulator):
+            self.connections["Reg"].append(cxn)
         else:
             raise ValueError(
-                f"Connection provided {type(cxn)} was not Pipe or Compressor"
+                f"Connection provided {type(cxn)} was not Pipe, Compressor, or Regulator"
             )
 
-    def update_state(self, T: float, p: float, X: Composition, eos_type: str) -> tuple:
+    def update_state(self, T: float, p: float, x_h2: float) -> None:
         """
         Update the temperature, pressure, and composition at the node. Calculate rho and z based on EOS
         """
+        if self.composition.eos_type is None:
+            raise RuntimeError("Node EOS type is not set")
 
-        self.mw = X.mw
         self.pressure = p
+        self.x_h2 = float(x_h2)
 
-        if self.thermo_curvefit:
-            rho, z = self.X.get_curvefit_rho_z(p_gauge_pa=p)
-        else:
-            rho, z = eos.get_rz(p_gauge=p, T_K=T, X=X, eos=eos_type, mw=X.mw)
+    @property
+    def rho(self):
+        """
+        Density kg/m3
+        """
+        rho, _ = self.composition.get_rho_z(
+            p_gauge_pa=self.pressure, x=self.x_h2, mw=self.mw
+        )
+        return rho
 
-        self.z = z
-        self.rho = rho
-
-        return rho, z
+    @property
+    def z(self):
+        """
+        Compressibility
+        """
+        _, z = self.composition.get_rho_z(
+            p_gauge_pa=self.pressure, x=self.x_h2, mw=self.mw
+        )
+        return z
 
     def heating_value(self) -> float:
         """
-        Get the higher heating value at the node
+        Get the higher heating value at the node.
         """
-        return self.X.HHV
+        return self.composition.get_hhv(self.x_h2)
+
+    @property
+    def mw(self):
+        """
+        Molecular weight (kg/kmol).
+        """
+
+        return self.composition.get_mw(p_gauge_pa=self.pressure, x=self.x_h2)
+
+    @property
+    def mu(self):
+        """
+        Molecular weight (kg/kmol).
+        """
+        return self.composition.get_mu(p_gauge_pa=self.pressure, x=self.x_h2)
 
     @property
     def cpcv(self):
         """
         Heat capacity
         """
-        ctu.gas.TPX = gl.T_FIXED, self.pressure + ct.one_atm, self.X.x_str
-        return ctu.gas.cp_mass / ctu.gas.cv_mass
+        return self.composition.get_cpcv(p_gauge_pa=self.pressure, x=self.x_h2)

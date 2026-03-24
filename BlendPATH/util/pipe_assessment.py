@@ -10,8 +10,8 @@ PSA2KPSI = 1 / 1000
 MPA2KPSI = MPA2PSI * PSA2KPSI
 # https://www.neelconsteel.com/api-5l-seamless-pipe.html
 PIPE_STR = {
-    "a": {"SMYS": 30500, "SMTS": 48600},
-    "b": {"SMYS": 35500, "SMTS": 60200},
+    "A": {"SMYS": 30500, "SMTS": 48600},
+    "B": {"SMYS": 35500, "SMTS": 60200},
     "X42": {"SMYS": 42100, "SMTS": 60200},
     "X46": {"SMYS": 46400, "SMTS": 63100},
     "X52": {"SMYS": 52200, "SMTS": 66700},
@@ -23,7 +23,7 @@ PIPE_STR = {
 PIPE_STR = {
     x: {"SMYS": v["SMYS"] / MPA2PSI, "SMTS": v["SMTS"] / MPA2PSI}
     for x, v in PIPE_STR.items()
-    if x not in ["a", "b", "X46"]
+    if x not in ["A"]
 }
 # To match up with int conversions in V1
 # PIPE_STR = {
@@ -34,6 +34,7 @@ PIPE_STR = {
 #     "X65": {"SMYS": 450, "SMTS": 535},
 #     "X70": {"SMYS": 485, "SMTS": 570},
 # }
+_STEEL_GRADE_CODES = ["X"]
 
 
 _DESIGN_OPTIONS = Literal["a", "b", "no fracture criterion", "nfc"]
@@ -41,16 +42,16 @@ _DESIGN_OPTIONS = Literal["a", "b", "no fracture criterion", "nfc"]
 
 @dataclass
 class ASME_consts:
-    location_class: int
-    T_rating: int
-    joint_factor: int
+    location_class: int = None
+    T_rating: int = None
+    joint_factor: int = None
 
 
 def get_pipe_grades() -> list:
     """
     Get all available pipe grades
     """
-    return PIPE_STR.keys()
+    return [val for val in PIPE_STR.keys() if val not in ["B", "X46"]]
 
 
 def get_SMYS_SMTS(grade: str) -> tuple:
@@ -217,14 +218,14 @@ def get_viable_schedules(
     ASME_params: ASME_consts,
     grade: str,
     p_max_mpa_g: float,
-    pressure_ASME_MPa: float,
+    design_pressure_MPa: float,
     DN: float,
 ) -> tuple:
     """
     Get schedules and thicknesses that satisfy ASME B31.12
     """
-    th_vals = np.array(sch_list["data"][0][2:])
-    sch_vals = np.array(sch_list["columns"][2:])
+    th_vals = np.array([*sch_list.values()])
+    sch_vals = np.array([*sch_list.keys()])
 
     # Get design factor
     design_factor = get_design_factor(
@@ -294,7 +295,7 @@ def get_pipe_volume(diam_o_m: float, diam_i_m: float, length_m: float) -> float:
     return np.pi / 4 * (diam_o_m**2 - diam_i_m**2) * length_m
 
 
-def check_design_option(design_option: str):
+def check_design_option(design_option: str | float):
     # Cast to string
     design_option_formatted = str(design_option).lower()
     # If not in preselected options, then filter for numerical value

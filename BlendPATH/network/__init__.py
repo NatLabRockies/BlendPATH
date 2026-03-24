@@ -1,1 +1,1 @@
-from .BlendPATH_network import BlendPATH_network, Design_params
+from .BlendPATH_network import BlendPATH_network

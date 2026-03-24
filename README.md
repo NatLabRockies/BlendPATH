@@ -1,8 +1,9 @@
 # Blending Pipeline Analysis Tool for Hydrogen
 
 [![DOI 10.11578/dc.20240216.1](https://img.shields.io/badge/DOI-10.11578%2Fdc.20240216.1-brightgreen?link=https://doi.org/10.11578/dc.20240216.1)](https://www.osti.gov/biblio/2309692)
+[![DOI 10.11578/dc.20240216.1](https://img.shields.io/badge/DOI-10.2172%2F2583524-brightgreen?link=https://doi.org/10.2172/2583524)](https://www.osti.gov/biblio/2583524)
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![Python](https://img.shields.io/badge/python-3.8_|_3.9_|_3.10_|_3.11-blue)]()
+[![Python](https://img.shields.io/badge/python-3.10_|_3.11_|_3.12_|_3.13-blue)]()
 
 [![Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
@@ -10,14 +11,14 @@
 Welcome to the Blending Pipeline Analysis Tool for Hydrogen (BlendPATH) [SWR-24-10](https://www.osti.gov/doecode/biblio/117221). 
 
 # User Manual
-Please refer to the [BlendPATH User Manual](https://docs.nrel.gov/docs/fy25osti/87790.pdf) for in-depth documentation. The file is also available in the repository linked [here](user_manual/BlendPATH_User_Manual.pdf).
+Please refer to the [BlendPATH User Manual](https://docs.nlr.gov/docs/fy25osti/87790.pdf) for in-depth documentation. The file is also available in the repository linked [here](user_manual/BlendPATH_User_Manual.pdf).
 
 # Installation
 This is a Python-based tool. The instructions below assumes that the user possesses background knowledge in Python and has Anaconda installed. Below is a quick-start guide:
 
 The BlendPATH repository can by cloned to your local computer using:
 ```console
-git clone https://github.com/NREL/BlendPATH.git
+git clone https://github.com/natlabrockies/BlendPATH.git
 ```
 
 ## Create environment
@@ -60,7 +61,7 @@ This will bring up a list of your available environments. Select the environment
 BlendPATH can be run in a Python script by importing the package. There is also an example script to show usage in the [examples](examples) directory. Within this directory is a [template.py](examples/template.py) file. This uses the data files in the [wangetal2018](examples/wangetal2018) directory,
 
 # License terms - ProFAST
-By downloading and using BlendPATH, the user also agrees to the [BlendPATH license terms](LICENSE) as well as the license terms of [ProFAST](https://github.com/NREL/ProFAST/blob/main/LICENSE).
+By downloading and using BlendPATH, the user also agrees to the [BlendPATH license terms](LICENSE) as well as the license terms of [ProFAST](https://github.com/natlabrockies/ProFAST/blob/main/LICENSE).
 
 # NOTE: 
 BlendPATH continues to see active development and maintenance. If you observe issues with the code, please inform the authors of said issues for continuous improvement. Lastly, please include version number when referencing or citing BlendPATH. 
