@@ -18,7 +18,7 @@ authors = [
     {name="Burcin Cakir Erdener",email="Burcin.CakirErdener@nlr.gov"},
     {name="Kevin Topolski",email="Kevin.Topolski@nlr.gov"},
 ]
-version = '2.1'
+version = '2.1.1'
 readme = "README.md"
 requires-python  = ">=3.10, <3.14"
 dependencies = [
