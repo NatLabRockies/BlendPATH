@@ -248,6 +248,8 @@ def write_comp_sheet(
     for comp in new_network.compressors.values():
         segment_name = ""
         comp_type = "Existing"
+        if comp.original_rating_MW == 0:
+            comp_type = "New"
         if comp.original_rating_MW == 0 and mod_type in [
             "ac",
             "additional_compressors",
