@@ -19,6 +19,8 @@ class Steel_pipe(Pipe):
         rating_code: str = "",
         p_max_mpa_g: float = 0,
         ff_type: friction_factor.FF_TYPES = "hofer",
+        velocity_limit: float | None = None,
+        design_factor: float | None = None,
     ):
         super().__init__(
             from_node=from_node,
@@ -32,6 +34,8 @@ class Steel_pipe(Pipe):
             grade=rating_code,
             p_max_mpa_g=p_max_mpa_g,
             ff_type=ff_type,
+            velocity_limit=velocity_limit,
+            design_factor=design_factor,
         )
         self.material = "steel"
         self.assign_DN()
@@ -63,7 +67,6 @@ class Steel_pipe(Pipe):
         if self.thickness_mm == 0:
             self.schedule = schs[np.argmin(ths)]
             return
-
         self.schedule = schs[np.nanargmin(abs(ths - self.thickness_mm))]
 
     def pipe_assessment(
@@ -78,7 +81,9 @@ class Steel_pipe(Pipe):
         """
         self.SMYS, self.SMTS = bp_pa.get_SMYS_SMTS(self.grade)
         self.design_pressure_MPa = self.design_pressure_ASME(
-            design_option=design_option,
+            design_option=self.design_factor
+            if self.design_factor is not None
+            else design_option,
             location_class=location_class,
             joint_factor=joint_factor,
             T_derating_factor=T_derating_factor,
@@ -97,6 +102,8 @@ class Steel_pipe(Pipe):
         design_factor = bp_pa.get_design_factor(
             design_option=design_option, location_class=location_class
         )
+        if design_factor <= 0:
+            return 0.0
         pressure_ASME_MPa = bp_pa.get_design_pressure_ASME(
             design_p_MPa=self.p_max_mpa_g,
             design_option=design_option,

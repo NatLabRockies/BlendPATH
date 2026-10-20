@@ -1,0 +1,5 @@
+regulator_pressure_limit_bar,regulator_cost
+5,20000
+16,25000
+41,400000
+80,3000000

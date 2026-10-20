@@ -162,13 +162,28 @@ def make_compressor_network(
     n_comps: int, p_in: float, seg_params: bp_mod_util.Segment_params
 ) -> tuple:
     """
-    Make a new network with compressors added to segment
+    Make a new network with compressors added to segment.
+
+    Internal note:
+    This is a synthetic mini-network used for hydraulic solving, not final GIS output.
+    We therefore assign a simple 1D geometry:
+      x = cumulative length [km], y = 0
+    so every newly created node has plot_xy.
     """
+
+    def _xy_at_length(length_km: float) -> tuple[float, float]:
+        return (float(length_km), 0.0)
+
     # Make inlet node
-    n_ds_in = bp_plc.Node(name="in", composition=seg_params.composition, index=0)
+    n_ds_in = bp_plc.Node(
+        name="in",
+        composition=seg_params.composition,
+        index=0,
+        plot_xy=(0.0, 0.0),
+    )
     nodes = {n_ds_in.name: n_ds_in}
     prev_node = n_ds_in
-    prev_length = 0
+    prev_length = 0.0
 
     pipes = {}
     compressors = {}
@@ -193,13 +208,15 @@ def make_compressor_network(
         hhv=seg_params.hhv,
     )
 
-    node_index = 1  # Since supply node was alread added
+    node_index = 1  # Since supply node was already added
     pipe_index = 0
     demand_index = 0
     comp_index = 0
+
     for val in all_lengths:
-        length = val.length_km
-        same_node = length - prev_length == 0
+        length = float(val.length_km)
+        same_node = (length - prev_length) == 0
+
         if val.val_type == "offtake":
             if same_node:
                 d_name = f"demand_{demand_index}"
@@ -209,8 +226,13 @@ def make_compressor_network(
                 )
             else:
                 name = f"ot_{node_index - 1}"
-                nodes[name] = bp_plc.Node(name=name, composition=seg_params.composition)
+                nodes[name] = bp_plc.Node(
+                    name=name,
+                    composition=seg_params.composition,
+                    plot_xy=_xy_at_length(length),
+                )
                 node_index += 1
+
                 d_name = f"demand_{demand_index}"
                 demands[d_name] = bp_plc.Demand_node(
                     node=nodes[name],
@@ -230,17 +252,20 @@ def make_compressor_network(
                 prev_length = length
                 pipe_index += 1
                 prev_node = nodes[name]
+
             demand_index += 1
 
         elif val.val_type == "comp":
             if same_node:
-                # # Make compressor to node
+                # compressor inlet node at same location as prev_node
                 name_from = f"c_{node_index - 1}"
                 nodes[name_from] = bp_plc.Node(
-                    name=name_from, composition=seg_params.composition
+                    name=name_from,
+                    composition=seg_params.composition,
+                    plot_xy=prev_node.plot_xy,
                 )
                 node_index += 1
-                # Make comp
+
                 comp_name = f"c_{comp_index}"
                 compressors[comp_name] = bp_plc.Compressor(
                     name=comp_name,
@@ -251,6 +276,7 @@ def make_compressor_network(
                     fuel_extract=not seg_params.new_comps_elec,
                 )
                 pipes[p_name].to_node = nodes[name_from]
+
                 if not seg_params.new_comps_elec:
                     compressors[comp_name].eta_comp_s = seg_params.eta_s
                     compressors[comp_name].eta_driver = seg_params.eta_driver
@@ -258,17 +284,19 @@ def make_compressor_network(
                     compressors[comp_name].eta_comp_s_elec = seg_params.eta_s
                     compressors[comp_name].eta_driver_elec = seg_params.eta_driver
 
-                # No update to prev node
-                # prev_node = prev_node
+                # prev_node unchanged
+
             else:
-                # Make compressor from node
+                # compressor from node
                 name_from = f"c_{node_index - 1}"
                 nodes[name_from] = bp_plc.Node(
-                    name=name_from, composition=seg_params.composition
+                    name=name_from,
+                    composition=seg_params.composition,
+                    plot_xy=_xy_at_length(length),
                 )
                 node_index += 1
 
-                # Make pipe to compressor
+                # pipe to compressor
                 p_name = f"pipe_{pipe_index}"
                 pipes[p_name] = bp_plc.Pipe(
                     name=p_name,
@@ -281,14 +309,15 @@ def make_compressor_network(
                 prev_length = length
                 pipe_index += 1
 
-                # # Make compressor to node
+                # compressor to node
                 name_to = f"c_{node_index - 1}"
                 nodes[name_to] = bp_plc.Node(
-                    name=name_to, composition=seg_params.composition
+                    name=name_to,
+                    composition=seg_params.composition,
+                    plot_xy=_xy_at_length(length),
                 )
                 node_index += 1
 
-                # MAKE COMPRESSOR
                 comp_name = f"c_{comp_index}"
                 compressors[comp_name] = bp_plc.Compressor(
                     name=comp_name,
@@ -306,6 +335,7 @@ def make_compressor_network(
                     compressors[comp_name].eta_driver_elec = seg_params.eta_driver
 
                 prev_node = nodes[name_to]
+
             comp_index += 1
 
     # If a compressor exists in the segment
@@ -315,14 +345,16 @@ def make_compressor_network(
 
         # Add node after compressor
         final_node_name = "final_node"
+        final_demand_node_name = f"demand_{demand_index - 1}"
+        prev_final_node = demands[final_demand_node_name].node
+
         nodes[final_node_name] = bp_plc.Node(
             name=final_node_name,
             composition=seg_params.composition,
+            plot_xy=prev_final_node.plot_xy,
         )
 
         # Update demand to be the final node
-        final_demand_node_name = f"demand_{demand_index - 1}"
-        prev_final_node = demands[final_demand_node_name].node
         demands[final_demand_node_name].node = nodes[final_node_name]
 
         # Add the compressor
@@ -358,15 +390,15 @@ def make_compressor_network(
         addl_comp_network,
         end_node,
         l_comps,
-        addl_comp_network.pipes[list(pipes.keys())[0]],
+        addl_comp_network.pipes[next(iter(pipes.keys()))],
     )
 
 
 def get_num_compressors(
     p_in: float, seg_params: bp_mod_util.Segment_params
 ) -> tuple[list[int], list[float], float, BlendPATH_network]:
-    """Determine the number of compressors needed
-
+    """
+    Determine the number of compressors needed
     Args:
         p_in (float): Inlet pressure [Pa]
         seg_params (bp_mod_util.Segment_params): Segment static parameters
@@ -374,7 +406,6 @@ def get_num_compressors(
     Returns:
         tuple[list[int], list[float], float, BlendPATH_network]: n_comps, l_comps, m_dot, new_segment_network
     """
-
     # Quick algebraic solve for guessing number of compressors
     n_comps = guess_n_comps(p_in=p_in, seg_params=seg_params)
     max_n_comps = 10 if seg_params.comps_elec else 50
@@ -413,10 +444,8 @@ def get_num_compressors(
             if end_node.pressure >= seg_params.p_out_target:
                 # Check if compressor ratios are too high
                 if any(
-                    [
-                        cs.compression_ratio > seg_params.CR_ratio
-                        for cs in addl_comps.compressors.values()
-                    ]
+                    cs.compression_ratio > seg_params.CR_ratio
+                    for cs in addl_comps.compressors.values()
                 ):
                     n_comps = update_n_comps(
                         n_list=n_comps_tried, n_comps=n_comps, incr=1
@@ -471,6 +500,28 @@ def make_result_file(
     new_comps = {x: [] for x in mod_file_util.comps_cols()}
     new_nodes = {x: [] for x in mod_file_util.nodes_cols()}
 
+    def _append_node(store, name, p_max, xy):
+        store["node_name"].append(name)
+        store["p_max_mpa_g"].append(p_max)
+        store["plot_x"].append(xy[0])
+        store["plot_y"].append(xy[1])
+
+    def _interp_pipe_xy(pipe, dist_from_pipe_start_km):
+        x1, y1 = pipe.from_node.plot_xy
+        x2, y2 = pipe.to_node.plot_xy
+        if [x for x in [x1, y1, x2, y2] if x is None]:
+            return (None, None)
+        if pipe.length_km <= 0:
+            return (x1, y1)
+
+        frac = dist_from_pipe_start_km / pipe.length_km
+        frac = min(max(frac, 0.0), 1.0)
+
+        return (
+            x1 + frac * (x2 - x1),
+            y1 + frac * (y2 - y1),
+        )
+
     for ps_i, ps_comp in enumerate(n_comps_ps):
         # Get segment
         ps = nw.pipe_segments[ps_i]
@@ -490,12 +541,16 @@ def make_result_file(
             pipe_segmented = False
 
             pipe_from_node = pipe.from_node.name
-            new_nodes["node_name"].append(pipe_from_node)
-            new_nodes["p_max_mpa_g"].append(p_max_seg)
+            pipe_from_xy = pipe.from_node.plot_xy
+            _append_node(new_nodes, pipe_from_node, p_max_seg, pipe_from_xy)
 
             # If length passes where the compresser, add the compressor
             while comp_len_i < ps_comp and l_comps[comp_len_i] < pipe_len_remaining:
                 pipe_segmented = True
+
+                pipe_start_chain = pipe_len_cum - pipe.length_km
+                dist_on_this_pipe = l_comps[comp_len_i] - pipe_start_chain
+                split_xy = _interp_pipe_xy(pipe, dist_on_this_pipe)
 
                 # Check if it overlaps with already existing node:
                 if abs(l_comps[comp_len_i] - len_added) < 0.01:
@@ -505,20 +560,18 @@ def make_result_file(
                     to_comp_name = new_nodes["node_name"][-1]
                     new_pipes["to_node"][-1] = from_comp_name
 
-                    new_nodes["node_name"].append(from_comp_name)
-                    new_nodes["p_max_mpa_g"].append(p_max_seg)
+                    _append_node(new_nodes, from_comp_name, p_max_seg, split_xy)
 
                 else:
                     # Add node before compressor
                     from_comp_name = f"N_pre_C_{ps_i}_{comp_len_i}"
-                    new_nodes["node_name"].append(from_comp_name)
-                    new_nodes["p_max_mpa_g"].append(p_max_seg)
+                    _append_node(new_nodes, from_comp_name, p_max_seg, split_xy)
 
                     # Add pipe to compressor
                     pipe_name = f"{pipe.name}_pre_C_{ps_i}_{comp_len_i}"
                     new_pipes["pipe_name"].append(pipe_name)
                     new_pipes["from_node"].append(pipe_from_node)
-                    new_pipes["to_node"].append(from_comp_name)  #
+                    new_pipes["to_node"].append(from_comp_name)
                     new_pipes["length_km"].append(l_comps[comp_len_i] - len_added)
                     new_pipes["roughness_mm"].append(pipe.roughness_mm)
                     new_pipes["diameter_mm"].append(pipe.diameter_mm)
@@ -527,8 +580,7 @@ def make_result_file(
 
                     # Add node after compressor
                     to_comp_name = f"N_post_C_{ps_i}_{comp_len_i}"
-                    new_nodes["node_name"].append(to_comp_name)
-                    new_nodes["p_max_mpa_g"].append(p_max_seg)
+                    _append_node(new_nodes, to_comp_name, p_max_seg, split_xy)
 
                 # Add compressor
                 comp_name = f"C_{ps_i}_{comp_len_i}"
@@ -546,7 +598,6 @@ def make_result_file(
                 # Update latest node to the outlet of new compressor
                 pipe_from_node = to_comp_name
 
-                #
                 len_added = l_comps[comp_len_i]
                 # increase comp number
                 comp_len_i += 1
@@ -575,11 +626,11 @@ def make_result_file(
                 else:
                     new_nodes["node_name"].pop()
                     new_nodes["p_max_mpa_g"].pop()
+                    new_nodes["plot_x"].pop()
+                    new_nodes["plot_y"].pop()
                     new_comps["to_node"][-1] = pipe.to_node.name
-                    pass
 
-        new_nodes["node_name"].append(pipe.to_node.name)
-        new_nodes["p_max_mpa_g"].append(p_max_seg)
+        _append_node(new_nodes, pipe.to_node.name, p_max_seg, pipe.to_node.plot_xy)
 
     # Add existing compressors
     for comp in nw.compressors.values():
@@ -614,7 +665,7 @@ def make_result_file(
         new_supply["blend"].append(nw.composition.x["H2"])
 
     if add_supply_comp:
-        sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
+        sn = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))]
 
         # Add new compressor
         new_comps["compressor_name"].insert(0, "Supply compressor")
@@ -627,13 +678,16 @@ def make_result_file(
             0, "" if np.isnan(assign_eta_driver) else assign_eta_driver
         )
         p_max = np.inf
-        for pipe in supply.node.connections["Pipe"]:
+        for pipe in sn.node.connections["Pipe"]:
             p_max = min(pipe.design_pressure_MPa, p_max)
         new_comps["pressure_out_mpa_g"].insert(0, supply_p)
+        sx, sy = sn.node.plot_xy
 
         # Add new node
         new_nodes["node_name"].insert(0, "Supply compressor from_node")
         new_nodes["p_max_mpa_g"].insert(0, p_max)
+        new_nodes["plot_x"].insert(0, sx)
+        new_nodes["plot_y"].insert(0, sy)
 
         # Update supply node
         new_supply["node_name"][-1] = "Supply compressor from_node"
@@ -691,7 +745,7 @@ def get_segment_results(
 ):
     supply_comp_inputs = None
     add_supply_comp = False
-    sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
+    sn = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))]
     orig_supply_pressure = min(sn.pressure_mpa, seg_params.design_pressure_MPa)
     if sn.node.name in seg_params.ps_nodes and orig_supply_pressure < sup_p:
         add_supply_comp = True
@@ -705,6 +759,7 @@ def get_segment_results(
         )
 
     mod_costing_params = bp_mod_util.get_mod_costing_params(
+        original_network=None,
         network=addl_comps,
         design_params=seg_params.design_params,
         costing_params=seg_params.costing_params,

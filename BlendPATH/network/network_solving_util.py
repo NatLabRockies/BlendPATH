@@ -1,13 +1,17 @@
 import logging
 from collections import defaultdict, deque
-from typing import TYPE_CHECKING, Union
-
-import numpy as np
-import scipy.sparse as sp
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import BlendPATH.Global as gl
+import BlendPATH.network.pipeline_components as plc
 import BlendPATH.network.pipeline_components.cantera_util as ctu
+import numpy as np
+import numpy.typing as npt
+import scipy.sparse as sp
+import scipy.sparse.linalg
 from BlendPATH.network.pipeline_components import friction_factor
+from BlendPATH.network.pipeline_components.regulator import RegulatorMode
 
 if TYPE_CHECKING:
     from BlendPATH import BlendPATH_network
@@ -15,7 +19,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def make_connections(network: "BlendPATH_network", shape_pn: tuple[int, int]):
+@dataclass
+class Network_cxns:
+    rows: list[int]
+    cols: list[int]
+    pipe_index: list[int]
+    direction: list[int]
+    cxn_matrix: sp.csr_matrix
+
+
+def make_connections(
+    network: "BlendPATH_network", shape_pn: tuple[int, int]
+) -> Network_cxns:
     rows = []
     cols = []
     pipe_index = []
@@ -56,59 +71,239 @@ def make_connections(network: "BlendPATH_network", shape_pn: tuple[int, int]):
     logger.debug(f"Connection matrix pipe_index: {pipe_index}")
     logger.debug(f"Connection matrix coef: {coef}")
 
-    return (
-        rows,
-        cols,
-        pipe_index,
-        np.asarray(coef),
-        sp.csr_matrix((nodal_data, (nodal_rows, nodal_cols)), shape=shape_pn),
+    return Network_cxns(
+        rows=rows,
+        cols=cols,
+        pipe_index=pipe_index,
+        direction=np.asarray(coef),
+        cxn_matrix=sp.csr_matrix(
+            (nodal_data, (nodal_rows, nodal_cols)), shape=shape_pn
+        ),
     )
 
 
-def get_flow_targets(n_adj: float, network: "BlendPATH_network") -> tuple:
-    
+def get_flow_targets(
+    n_adj: int,
+    network: "BlendPATH_network",
+) -> tuple[np.ndarray, list[int], list[int]]:
+    """
+    Build nodal flow targets for a network containing regulators.
+    Regulator flow is handled as a branch unknown in the Newton system.
+    """
     for dn in network.demand_nodes.values():
         dn.recalc_mdot()
-    
+
     m_dot_target = np.zeros(n_adj)
 
-    # Get names of demand nodes
-    dn_nodes = [
-        node.node.index
-        for node in network.demand_nodes.values()
-        if node.node.index not in network.ignore_nodes
-    ]
-    # Add flow rate [kg/s] to m_dot_target
-    for node in network.demand_nodes.values():
-        if node.node.index in network.ignore_nodes:
+    balance_nodes: list[int] = []
+
+    for dn in network.demand_nodes.values():
+        if dn.node.index in network.ignore_nodes:
             continue
-        m_dot_target[node.node.index_adj] += node.flowrate_mdot
-    # For supply nodes, add the m_dot_target if it is a flow rate supply (not pressure)
-    for node in network.supply_nodes.values():
-        if not node.is_pressure_supply:
-            m_dot_target[node.node.index_adj] -= node.flowrate_mdot
-            dn_nodes.append(node.node.index)
+        m_dot_target[dn.node.index_adj] += dn.flowrate_mdot
+        balance_nodes.append(dn.node.index)
 
-    # Get the adjusted node indexes (without ignore nodes)
-    dn_node_adj = [network.get_n_adj(i) for i in dn_nodes]
-    # If compressor or regulator at the end of segment. Add the from node, instead of to node
-    # That way the flow rate can still be targetted
+    for sn in network.supply_nodes.values():
+        if sn.is_pressure_supply:
+            continue
+        if sn.node.index in network.ignore_nodes:
+            continue
+        m_dot_target[sn.node.index_adj] -= sn.flowrate_mdot
+        balance_nodes.append(sn.node.index)
+
+    # Keep the existing compressor handling.
     for comp in network.compressors.values():
-        # If there is a compressor at the end of the segment
-        if not comp.to_node.connections["Pipe"]:
-            dn_nodes.append(comp.from_node.index)
-            dn_node_adj.append(comp.from_node.index_adj)
-    for reg in network.regulators.values():
-        # If there is a regulator at the end of the segment
-        if not reg.to_node.connections["Pipe"]:
-            dn_nodes.append(reg.from_node.index)
-            dn_node_adj.append(reg.from_node.index_adj)
+        if (
+            not comp.to_node.connections["Pipe"]
+            and comp.from_node.index_adj is not None
+        ):
+            balance_nodes.append(comp.from_node.index)
 
-    return m_dot_target, dn_nodes, dn_node_adj
+    # Get unique
+    balance_nodes = list(dict.fromkeys(balance_nodes))
+    balance_node_adj = [
+        network.get_n_adj(node_idx)
+        for node_idx in balance_nodes
+        if network.get_n_adj(node_idx) is not None
+    ]
+
+    return m_dot_target, balance_nodes, balance_node_adj
+
+
+def _build_regulator_mass_blocks(
+    network: "BlendPATH_network",
+    n_adj: int,
+) -> tuple[sp.csr_matrix, sp.csr_matrix]:
+    """
+    Build regulator branch-flow incidence blocks.
+    Positive regulator flow is defined from reg.from_node to reg.to_node.
+    In nodal-flow convention:
+        from_node: -m_reg
+        to_node:   +m_reg
+    """
+
+    if not network.regulators:
+        return sp.csr_matrix(0), sp.csr_matrix(0)
+
+    n_reg = len(network.regulators.values())
+
+    rows_adj: list[int] = []
+    cols_adj: list[int] = []
+    data_adj: list[float] = []
+
+    rows_full: list[int] = []
+    cols_full: list[int] = []
+    data_full: list[float] = []
+
+    for reg_i, reg in enumerate(network.regulators.values()):
+        to_adj = reg.to_node.index_adj
+        from_adj = reg.from_node.index_adj
+
+        if to_adj is None:
+            raise ValueError(
+                f"Regulator '{reg.name}' outlet node '{reg.to_node.name}' "
+                "must be a solved pressure unknown"
+            )
+
+        rows_adj.append(to_adj)
+        cols_adj.append(reg_i)
+        data_adj.append(1.0)
+
+        if from_adj is not None:
+            rows_adj.append(from_adj)
+            cols_adj.append(reg_i)
+            data_adj.append(-1.0)
+
+        rows_full.extend([reg.to_node.index, reg.from_node.index])
+        cols_full.extend([reg_i, reg_i])
+        data_full.extend([1.0, -1.0])
+
+    reg_mass_adj = sp.csr_matrix(
+        (data_adj, (rows_adj, cols_adj)),
+        shape=(n_adj, n_reg),
+    )
+
+    reg_mass_full = sp.csr_matrix(
+        (data_full, (rows_full, cols_full)),
+        shape=(network.n_nodes, n_reg),
+    )
+
+    return reg_mass_adj, reg_mass_full
+
+
+def _build_regulator_equation_block(
+    regulators: list[plc.Regulator],
+    n_adj: int,
+    reg_flow_solving: np.ndarray,
+) -> tuple:
+    """
+    Build regulator mode-equation blocks.
+    CONTROL mode:
+        p_out - p_set = 0
+    WIDE_OPEN mode:
+        p_out - p_in = 0
+    CLOSED mode:
+        m_reg = 0
+    """
+    n_reg = len(regulators)
+
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+
+    flow_rows: list[int] = []
+    flow_cols: list[int] = []
+    flow_data: list[float] = []
+
+    rhs = np.zeros(n_reg)
+
+    abs_residuals = []
+    abs_flow_residuals = []
+
+    for reg_i, reg in enumerate(regulators):
+        to_adj = reg.to_node.index_adj
+        from_adj = reg.from_node.index_adj
+
+        if to_adj is None:
+            raise ValueError(
+                f"Regulator '{reg.name}' outlet node must be a solved pressure node"
+            )
+
+        if reg.mode == RegulatorMode.CONTROL:
+            p_out = reg.to_node.pressure
+
+            if p_out is None:
+                raise ValueError(f"Regulator '{reg.name}' outlet pressure is not set")
+
+            residual = p_out - reg.setpoint_pa
+
+            rows.append(reg_i)
+            cols.append(to_adj)
+            data.append(1.0)
+
+            abs_residuals.append(abs(residual))
+
+        elif reg.mode == RegulatorMode.OPEN:
+            p_out = reg.to_node.pressure
+            p_in = reg.from_node.pressure
+
+            if p_out is None:
+                raise ValueError(f"Regulator '{reg.name}' outlet pressure is not set")
+
+            if p_in is None:
+                raise ValueError(f"Regulator '{reg.name}' inlet pressure is not set")
+
+            residual = p_out - p_in
+
+            rows.append(reg_i)
+            cols.append(to_adj)
+            data.append(1.0)
+
+            if from_adj is not None:
+                rows.append(reg_i)
+                cols.append(from_adj)
+                data.append(-1.0)
+
+            abs_residuals.append(abs(residual))
+
+        elif reg.mode == RegulatorMode.CLOSED:
+            residual = reg_flow_solving[reg_i]
+
+            flow_rows.append(reg_i)
+            flow_cols.append(reg_i)
+            flow_data.append(1.0)
+
+            abs_flow_residuals.append(abs(residual))
+
+        else:
+            raise ValueError(f"Unknown regulator mode: {reg.mode}")
+
+        rhs[reg_i] = -residual
+
+    max_abs_flow_residual = max(abs_flow_residuals, default=0)
+    max_abs_residual = max(abs_residuals, default=0)
+
+    reg_eq_block = sp.csr_matrix(
+        (data, (rows, cols)),
+        shape=(n_reg, n_adj),
+    )
+
+    reg_flow_block = sp.csr_matrix(
+        (flow_data, (flow_rows, flow_cols)),
+        shape=(n_reg, n_reg),
+    )
+
+    return (
+        reg_eq_block,
+        reg_flow_block,
+        rhs,
+        max_abs_residual,
+        max_abs_flow_residual,
+    )
 
 
 def initialize_handler(
-    initializer: Union[int, dict], network: "BlendPATH_network", cr_max: float
+    initializer: int | dict, network: "BlendPATH_network", cr_max: float
 ):
     logger.debug(
         f"Initializing network: {network.name}, using initializer {initializer}"
@@ -194,7 +389,7 @@ def initialize_2(network: "BlendPATH_network", cr_max: float):
     x_init = np.full_like(p_init, np.nan)
     for sn_i, start_node in enumerate(start_node_names):
         # BFS from supply node ignoring direction => BFS distance
-        pressures = {n: None for n in network.nodes.keys()}
+        pressures = {n: None for n in network.nodes}
         pressures[start_node] = network.nodes[start_node].pressure
         p_init[sn_i, network.nodes[start_node].index] = network.nodes[
             start_node
@@ -539,3 +734,296 @@ def check_h2_balance(network: "BlendPATH_network") -> None:
             raise RuntimeError("H2 mass conservation does not balance")
     elif abs(h2_in - h2_out) / h2_out > 0.01:
         raise RuntimeError("H2 mass conservation does not balance")
+
+
+def initialization(
+    initializer: int | dict[str, float],
+    network: "BlendPATH_network",
+    cr_max: Network_cxns,
+):
+    p_init = initialize_handler(initializer=initializer, network=network, cr_max=cr_max)
+
+    # Assign node pressures
+    for node in network.nodes.values():
+        if node.index in network.ignore_nodes:
+            continue
+        node.pressure = p_init[node.index_adj]
+    # Initialize regulator states
+    for reg in network.regulators.values():
+        reg.reset_solve_state()
+
+    return p_init
+
+
+@dataclass
+class Pipe_jacobian_info:
+    indices: list[tuple[float, float]]
+    jacobian: sp.csr_matrix
+    cxns: Network_cxns
+    pipe_static_props: list[list[float]]
+
+
+def pipe_jacobian_setup(network: "BlendPATH_network") -> Pipe_jacobian_info:
+    cxns = make_connections(
+        network=network, shape_pn=(network.n_nodes, len(network.pipes))
+    )
+    n_adj = network.n_nodes - len(network.ignore_nodes)
+    # Generate jacobian shape with zeros
+    jacobian = sp.csr_matrix(
+        ([0.0] * len(cxns.rows), (cxns.rows, cxns.cols)), shape=(n_adj, n_adj)
+    )
+    # Store indices map
+    j_inds = [
+        (i, j)
+        for i in range(n_adj)
+        for j in jacobian.indices[jacobian.indptr[i] : jacobian.indptr[i + 1]]
+    ]
+
+    pipe_static_props = np.array(
+        [pipe.get_pipe_static_properties() for pipe in network.pipes.values()]
+    )
+
+    return Pipe_jacobian_info(
+        indices=j_inds,
+        jacobian=jacobian,
+        cxns=cxns,
+        pipe_static_props=pipe_static_props,
+    )
+
+
+@dataclass
+class Reg_jacobian_info:
+    regulators: list[plc.Regulator]
+    mass_adj: sp.csr_matrix
+    mass_full: sp.csr_matrix
+
+
+def reg_jacobian_setup(network: "BlendPATH_network"):
+    regulators = list(network.regulators.values())
+
+    n_adj = network.n_nodes - len(network.ignore_nodes)
+    # TODO only have data updating
+    reg_mass_adj, reg_mass_full = _build_regulator_mass_blocks(
+        n_adj=n_adj, network=network
+    )
+    return Reg_jacobian_info(
+        regulators=regulators, mass_adj=reg_mass_adj, mass_full=reg_mass_full
+    )
+
+
+@dataclass
+class Regulator_jacobian:
+    eq_block: sp.csr_matrix
+    flow_block: sp.csr_matrix
+    rhs: sp.csr_matrix
+    mass_adj: sp.csr_matrix
+    err_abs_pa: float
+    err_abs_flow: float
+
+
+def make_regulator_jacobian(
+    reg_flow_solving: npt.NDArray[np.float64],
+    n_adj: int,
+    reg_jacobian_info: Reg_jacobian_info,
+) -> tuple[npt.NDArray[np.float64] | float, Regulator_jacobian | None]:
+    if not reg_jacobian_info.regulators:
+        return 0.0, Regulator_jacobian(
+            eq_block=sp.csr_matrix(0),
+            flow_block=sp.csr_matrix(0),
+            rhs=np.empty(0),
+            mass_adj=reg_jacobian_info.mass_adj,
+            err_abs_pa=0.0,
+            err_abs_flow=0.0,
+        )
+
+    (
+        reg_eq_block,
+        reg_flow_block,
+        rhs,
+        reg_err_abs,
+        reg_flow_err_abs,
+    ) = _build_regulator_equation_block(
+        regulators=reg_jacobian_info.regulators,
+        n_adj=n_adj,
+        reg_flow_solving=reg_flow_solving,
+    )
+
+    nodal_flow_reg = reg_jacobian_info.mass_full @ reg_flow_solving
+
+    return (
+        nodal_flow_reg,
+        Regulator_jacobian(
+            eq_block=reg_eq_block,
+            flow_block=reg_flow_block,
+            rhs=rhs,
+            mass_adj=reg_jacobian_info.mass_adj,
+            err_abs_pa=reg_err_abs,
+            err_abs_flow=reg_flow_err_abs,
+        ),
+    )
+
+
+def solve_linalg(
+    pipe_jacobian: sp.csr_matrix,
+    regulator_jacobian: Regulator_jacobian | None,
+    delta_flow: npt.NDArray[np.float64],
+    n_adj: int,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    # If including regulators
+    if regulator_jacobian.rhs.size > 0:
+        delta_vals = scipy.sparse.linalg.spsolve(
+            A=sp.bmat(
+                [
+                    [pipe_jacobian, regulator_jacobian.mass_adj],
+                    [regulator_jacobian.eq_block, regulator_jacobian.flow_block],
+                ],
+                format="csr",
+            ),
+            b=np.concatenate([delta_flow, regulator_jacobian.rhs]),
+        )
+    # Otherwise, treat as normal (only solving pipes)
+    else:
+        delta_vals = scipy.sparse.linalg.spsolve(pipe_jacobian, delta_flow)
+
+    if not np.all(np.isfinite(delta_vals)):
+        raise ValueError("Non-finite Newton update in regulator solve")
+
+    return delta_vals[:n_adj], delta_vals[n_adj:]
+
+
+def err_calculation(demand_target, demand_actual, delta_flow):
+    err_abs = np.max(np.abs(delta_flow))
+    if demand_target.size > 0:
+        valid = np.abs(demand_target) > 1e-12
+
+        if np.any(valid):
+            err_rel = np.max(
+                np.abs(
+                    (demand_target[valid] - demand_actual[valid]) / demand_target[valid]
+                )
+            )
+        else:
+            err_rel = 0.0
+    else:
+        err_rel = 0.0
+
+    return err_abs, err_rel
+
+
+def check_negative_pressure(
+    p_solving: npt.NDArray[np.float64], delta_p: npt.NDArray[np.float64], c_relax: float
+):
+    # Check if negative pressure. Apply correction to see if it resolves
+    if np.any(p_solving < 0):
+        ind = np.where(p_solving < 0)
+        p_solving[ind] -= delta_p[ind] * 0.99 / c_relax
+
+        if np.any(p_solving < 0):
+            raise ValueError("Negative pressure")
+
+
+def check_reg_flows(reg_flow_solving: npt.NDArray[np.float64]):
+    if not np.all(np.isfinite(reg_flow_solving)):
+        raise ValueError("Non-finite regulator flow")
+
+
+def exit_solving_loop(n_iter: int, limits: list[bool]) -> bool:
+    if n_iter > gl.MAX_ITER:
+        raise ValueError(f"Could not converge in {gl.MAX_ITER} iterations")
+
+    # Return true if all conditions are met
+    return all(limits)
+
+
+@dataclass
+class Tols:
+    tol_abs: float
+    tol_rel: float
+    regulator_tol_pa: float
+    regulator_recover_tol_pa: float | None
+
+    def __post_init__(self):
+        if self.regulator_recover_tol_pa is None:
+            self.regulator_recover_tol_pa = self.regulator_tol_pa
+
+
+def regulator_mode_updates(regulators: dict[str, plc.Regulator], tols: Tols):
+    mode_changed = False
+
+    for reg in regulators.values():
+        changed = reg.update_mode(
+            eps_pa=tols.regulator_tol_pa,
+            recover_eps_pa=tols.regulator_recover_tol_pa,
+            eps_mdot=tols.tol_abs,
+        )
+
+        if changed and reg.mode == RegulatorMode.CLOSED:
+            reg.flow_mdot = 0.0
+
+        mode_changed = mode_changed or changed
+
+    return mode_changed
+
+
+def convergence_checks(
+    network: "BlendPATH_network",
+    tols: Tols,
+    p_solving: npt.NDArray[np.float64],
+    low_p_buffer: float,
+):
+    check_regulator_violations(regulators=network.regulators, tols=tols)
+    check_h2_balance(network=network)
+    check_low_p_buffer(network=network, p_solving=p_solving, low_p_buffer=low_p_buffer)
+    check_demand_p_limits(network=network)
+
+
+def check_regulator_violations(regulators: dict[str, plc.Regulator], tols: Tols):
+    for reg in regulators.values():
+        reg.check_limits(
+            tol_pa=tols.regulator_tol_pa,
+            tol_mdot=tols.tol_abs,
+        )
+
+
+def check_low_p_buffer(
+    network: "BlendPATH_network",
+    p_solving: npt.NDArray[np.float64],
+    low_p_buffer: float,
+):
+    if np.any(
+        network.min_pressure_bound - p_solving
+        >= network.min_pressure_bound * low_p_buffer
+    ):
+        raise ValueError("Pressure below threshold")
+
+
+def check_demand_p_limits(
+    network: "BlendPATH_network",
+):
+    for dn in network.demand_nodes.values():
+        if dn.node.pressure is None:
+            raise ValueError(
+                f"Demand node '{dn.name}' at node '{dn.node.name}' "
+                "has no solved pressure"
+            )
+
+        if dn.node.pressure < dn.min_pressure_mpa_g * gl.MPA2PA:
+            raise ValueError(
+                f"Demand node '{dn.name}' at node '{dn.node.name}' "
+                f"has pressure {dn.node.pressure / gl.BAR2PA:.2f} bar, "
+                f"below required minimum of {dn.min_pressure_mpa_g} MPa-g"
+            )
+
+
+def update_demand_node_mdots(
+    network: "BlendPATH_network", nodal_flow_pipe: npt.NDArray[np.float64]
+) -> None:
+    stacking_demand = defaultdict(float)
+    for dnode in network.demand_nodes.values():
+        stacking_demand[dnode.node.index] += dnode.flowrate_mdot
+    for dnode in network.demand_nodes.values():
+        dnode.flowrate_mdot_sim = (
+            nodal_flow_pipe[dnode.node.index]
+            * dnode.flowrate_mdot
+            / stacking_demand[dnode.node.index]
+        )

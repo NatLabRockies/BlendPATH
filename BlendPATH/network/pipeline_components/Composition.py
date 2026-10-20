@@ -38,7 +38,7 @@ class Composition:
         self,
         pure_x: dict | None = None,
         composition_tracking: bool = False,
-        min_pres: float = SCENARIO_VALUES[Scenario_type.TRANSMISSION].min_pressure_pa,
+        min_pres: float = SCENARIO_VALUES[Scenario_type.DISTRIBUTION].min_pressure_pa,
         max_pres: float = SCENARIO_VALUES[Scenario_type.TRANSMISSION].max_pressure_pa,
         comp_interps_status: tuple = (None, None),
         thermo_curvefit: bool = True,

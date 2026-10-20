@@ -5,11 +5,10 @@ from os.path import exists
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pandas as pd
 from importlib_resources import files
-from ProFAST import ProFAST
 
 import BlendPATH.costing.pipe_costs.steel_pipe_costs
+import BlendPATH.costing.profast_util
 import BlendPATH.Global as gl
 
 if TYPE_CHECKING:
@@ -41,7 +40,18 @@ class Costing_params:
     pipe_markup: float = None
     compressor_markup: float = None
     financial_overrides: dict = field(default_factory=dict)
+    polymer_cost_type: float = None
     steel_cost: dict = None
+    odorant_cost: float = None
+    supply_regulator_cost: float = None
+    regulator_blend_limit: float = None
+    msa_blend_limit: float = None
+    valve_blend_limit: float = None
+    valve_cost_distribution: float = None
+    valve_density: float = None
+    valve_replacement_fraction: float = None
+    regulator_maintenance_fraction: float = None
+    regulator_refurbishment_fraction: float = None
 
 
 def get_steel_cost_file(steel_cost_file: str) -> dict:
@@ -84,242 +94,43 @@ def calc_lcot(
     Calculate the levelized cost of transport with ProFAST
     """
 
-    jsonfilename = f"{costing_params.casestudy_name}/financial_params.json"
-    if not exists(jsonfilename):
-        jsonfilename = files("BlendPATH.costing").joinpath(
-            "default_financial_params.json"
-        )
-
-    pf = ProFAST(jsonfilename)
-    if costing_params.financial_overrides is not None:
-        for i, v in costing_params.financial_overrides.items():
-            pf.set_params(i, v)
-
+    pf = BlendPATH.costing.profast_util.profast_init(costing_params=costing_params)
+    BlendPATH.costing.profast_util.profast_overrides(
+        pf=pf, costing_params=costing_params
+    )
     gen_inflation = pf.vals["general inflation rate"]
-
-    pf.set_params("capacity", mod_costing_params.capacity)  # MMBTU/day
-    pf.set_params(
-        "commodity",
-        {
-            "name": "Natural Gas-H2 Blend",
-            "unit": "MMBTU",
-            "initial price": 0.25,
-            "escalation": gen_inflation,
-        },
+    BlendPATH.costing.profast_util.set_capacity(
+        pf=pf, mod_costing_params=mod_costing_params
     )
 
-    col_names = {
-        "new_pipe": "New pipe CapEx",
-        "new_comp": "New compression capacity CapEx",
-        "refurb_comp": "Refurbished compressor capacity CapEx",
-        "supply_comp": "Supply compressor CapEx",
-        "meter": "Meter & regulator station modification CapEx",
-        "valve": "Valve replacement CapEx",
-        "orig_network": "Original network residual value",
-        "ili": "In-line inspection",
-        "fuel": "Compressor fuel",
-        "fuel_elec": "Compressor fuel (electric)",
-        "supply_fuel_elec": "Supply commpressor fuel (electric)",
-        "supply_fuel_gas": "Supply commpressor fuel",
-    }
-
-    # Add compressor fuel (gas and electric)
-    pf.add_feedstock(
-        name=col_names["fuel"],
-        usage=mod_costing_params.all_fuel_usage,
-        unit="MMBTU",
-        cost=costing_params.cf_price,
-        escalation=gen_inflation,
-    )
-    pf.add_feedstock(
-        name=col_names["fuel_elec"],
-        usage=mod_costing_params.all_fuel_elec,
-        unit="kWh",
-        cost=costing_params.elec_price,
-        escalation=gen_inflation,
+    # Add feedstocks to ProFAST (gas, elec compressor fuel)
+    BlendPATH.costing.profast_util.pf_add_feedstocks(
+        pf=pf,
+        mod_feedstocks=mod_costing_params.feedstocks,
+        inflation=gen_inflation,
+        costing_params=costing_params,
     )
 
-    pf.add_feedstock(
-        name=col_names["supply_fuel_elec"],
-        usage=mod_costing_params.supply_comp_fuel["elec"],
-        unit="kWh",
-        cost=costing_params.elec_price,
-        escalation=gen_inflation,
-    )
-    pf.add_feedstock(
-        name=col_names["supply_fuel_gas"],
-        usage=mod_costing_params.supply_comp_fuel["gas"],
-        unit="MMBTU",
-        cost=costing_params.cf_price,
-        escalation=gen_inflation,
+    # Add capital items to ProFAST
+    BlendPATH.costing.profast_util.pf_add_capital(
+        pf=pf,
+        mod_capital=mod_costing_params.capital,
+        depr_period=pf.vals["operating life"],
+        costing_params=costing_params,
+        new_pipe_capex=new_pipe_capex,
     )
 
-    depr_period = pf.vals["operating life"]
-    # Add new pipe capex
-    pf.add_capital_item(
-        name=col_names["new_pipe"],
-        cost=new_pipe_capex,
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-
-    # Add new compressors
-    pf.add_capital_item(
-        name=col_names["new_comp"],
-        cost=sum(mod_costing_params.comp_capex),
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-    # Add revamped compressors
-    pf.add_capital_item(
-        name=col_names["refurb_comp"],
-        cost=sum(mod_costing_params.revamped_comp_capex),
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-    # Add supply compressors
-    pf.add_capital_item(
-        name=col_names["supply_comp"],
-        cost=mod_costing_params.supply_comp_capex,
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-    # Add meter & regulator station
-    pf.add_capital_item(
-        name=col_names["meter"],
-        cost=mod_costing_params.meter_cost,
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-    # Add valve replacement
-    pf.add_capital_item(
-        name=col_names["valve"],
-        cost=mod_costing_params.valve_cost,
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-    # Add residual value of old network
-    pf.add_capital_item(
-        name=col_names["orig_network"],
-        cost=costing_params.original_pipeline_cost,
-        depr_type="Straight line",
-        depr_period=depr_period,
-        refurb=[0],
-    )
-
-    #   Add inline-inspection costs
-    pf.add_fixed_cost(
-        name=col_names["ili"],
-        usage=1,
-        unit="$",
-        cost=mod_costing_params.ili_costs,
-        escalation=gen_inflation,
+    # Add fixed costs to ProFAST
+    BlendPATH.costing.profast_util.pf_add_fixed_costs(
+        pf=pf, mod_fixed_costs=mod_costing_params.fixed_costs, inflation=gen_inflation
     )
 
     sol = pf.solve_price()
 
-    price_breakdown = pf.get_cost_breakdown()
-    price_breakdown_dict = dict(
-        zip(price_breakdown["Name"].values, price_breakdown["NPV"].values)
-    )
-
-    add_lcot_str = [f"LCOT: {x}" for x in col_names.values()]
-    prices_all = {
-        x: 0
-        for x in ["LCOT: Levelized cost of transport"]
-        + add_lcot_str
-        + ["LCOT: Fixed O&M", "LCOT: Taxes", "LCOT: Financial"]
-    }
-
-    prices_all["LCOT: Levelized cost of transport"] = sol["lco"]
-    prices_all[f"LCOT: {col_names['fuel']}"] = price_breakdown_cols(
-        price_breakdown_dict, [col_names["fuel"]], []
-    )
-    prices_all[f"LCOT: {col_names['fuel_elec']}"] = price_breakdown_cols(
-        price_breakdown_dict, [col_names["fuel_elec"]], []
-    )
-    prices_all[f"LCOT: {col_names['supply_fuel_gas']}"] = price_breakdown_cols(
-        price_breakdown_dict, [col_names["supply_fuel_gas"]], []
-    )
-    prices_all[f"LCOT: {col_names['supply_fuel_elec']}"] = price_breakdown_cols(
-        price_breakdown_dict, [col_names["supply_fuel_elec"]], []
-    )
-
-    # Get financial expense associated with equipment
-    pos = ["Repayment of debt", "Interest expense", "Dividends paid"]
-    neg = ["Inflow of debt", "Inflow of equity"]
-    cap_expense = price_breakdown_cols(price_breakdown_dict, pos, neg)
-
-    # Get remaining financial expenses
-    pos = ["Non-depreciable assets", "Cash on hand reserve"]
-    neg = ["Sale of non-depreciable assets", "Cash on hand recovery"]
-    prices_all["LCOT: Financial"] = price_breakdown_cols(price_breakdown_dict, pos, neg)
-
-    # Get tax related
-    pos = ["Income taxes payable", "Capital gains taxes payable"]
-    neg = ["Monetized tax losses"]
-    prices_all["LCOT: Taxes"] = price_breakdown_cols(price_breakdown_dict, pos, neg)
-
-    # Get fixed O&M
-    pos = ["Administrative expenses", "Property insurance"]
-    neg = []
-    prices_all["LCOT: Fixed O&M"] = price_breakdown_cols(price_breakdown_dict, pos, neg)
-
-    # Get inline inspection
-    pos = [col_names["ili"]]
-    neg = []
-    prices_all["LCOT: In-line inspection"] = price_breakdown_cols(
-        price_breakdown_dict, pos, neg
-    )
-
-    total_capex = {
-        col_names["new_pipe"]: new_pipe_capex,
-        col_names["orig_network"]: costing_params.original_pipeline_cost,
-        col_names["new_comp"]: sum(mod_costing_params.comp_capex),
-        col_names["refurb_comp"]: sum(mod_costing_params.revamped_comp_capex),
-        col_names["supply_comp"]: mod_costing_params.supply_comp_capex,
-        col_names["meter"]: mod_costing_params.meter_cost,
-        col_names["valve"]: mod_costing_params.valve_cost,
-    }
-
-    capex_sum = sum(total_capex.values())
-    capex_fraction = {x: 0 for x in total_capex.keys()}
-    if capex_sum > 0:
-        capex_fraction = {x: y / capex_sum for x, y in total_capex.items()}
-
-    # Get CAPEX and distribute related financial expenses
-    for i in total_capex.keys():
-        prices_all[f"LCOT: {i}"] = (
-            price_breakdown_cols(price_breakdown_dict, [i])
-            + cap_expense * capex_fraction[i]
-        )
+    prices_all = BlendPATH.costing.profast_util.pf_aggregation(pf=pf, lcot=sol["lco"])
 
     # Collect ProFAST inputs to recreate
-    pf_in = {}
-    pf_in["vals"] = {i: v for i, v in pf.vals.items()}
-    pf_in["capital"] = {
-        i: {
-            "cost": v.cost,
-            "depr_type": v.depr_type,
-            "depr_period": v.depr_period,
-            "refurb": v.refurb,
-        }
-        for i, v in pf.capital_items.items()
-    }
-    pf_in["feedstocks"] = {
-        i: {"cost": v.cost, "usage": v.usage, "escalation": v.escalation}
-        for i, v in pf.feedstocks.items()
-    }
-    pf_in["fixed_costs"] = {
-        i: {"cost": v.cost, "escalation": v.escalation}
-        for i, v in pf.fixed_costs.items()
-    }
+    pf_in = BlendPATH.costing.profast_util.pf_get_inputs(pf=pf)
 
     return prices_all, pf_in
 
@@ -359,7 +170,7 @@ def get_cs_fuel_cost(
         "operating life",
     ]
     fin_params = {
-        x: d["variables"][x] if x not in fin_overrides.keys() else fin_overrides[x]
+        x: d["variables"][x] if x not in fin_overrides else fin_overrides[x]
         for x in var_list
     }
     make_range = range(
@@ -390,13 +201,8 @@ def get_cs_fuel_cost(
 
     key_intersect = ng_years.union(h2_years)
 
-    ng_price_all = {
-        year: (ng_cost[year] if year in ng_cost.keys() else 0) for year in key_intersect
-    }
-    h2_price_all = {
-        year: (h2_cost_MMBTU[year] if year in h2_cost_MMBTU.keys() else 0)
-        for year in key_intersect
-    }
+    ng_price_all = {year: (ng_cost.get(year, 0)) for year in key_intersect}
+    h2_price_all = {year: (h2_cost_MMBTU.get(year, 0)) for year in key_intersect}
 
     def cs_func(ng, h2, b):
         return ng * (1 - b) + h2 * b
@@ -421,20 +227,19 @@ def get_compressor_cost(
     cols = ["Material", "Labor", "Misc", "Land"]
     rui_amsymptote = {"Material": 694.09, "Labor": 400.24, "Misc": 306.65, "Land": 7.88}
     comp_costs = {x: 0 for x in cols}
+    comp_overrides = cp.comp_cost_override or {}
     for cost_type in cols:
-        if cost_type in cp.comp_cost_override.keys():
-            comp_costs[cost_type] = avg_station_cap * cp.comp_cost_override[cost_type]
+        if cost_type in comp_overrides:
+            comp_costs[cost_type] = avg_station_cap * comp_overrides[cost_type]
         else:
             # Rui ampytotes to 1400 $/hp above 30,000 hp
             if avg_station_cap > 30_000:
                 comp_costs[cost_type] = rui_amsymptote[cost_type] * avg_station_cap
             else:
                 station_cap_array = [avg_station_cap**x for x in [0, 1, 2]]
-
                 comp_costs[cost_type] = np.dot(
                     COMPR_COSTS[cost_type], station_cap_array
                 )
-
             CPI_ratio = 596.2 / 575.4  # Go from 2008 to 2020
             comp_costs[cost_type] *= CPI_ratio
 
@@ -442,19 +247,8 @@ def get_compressor_cost(
         comp_costs[cols.index("Land")] = 0
 
     comp_cost_i = sum(comp_costs.values()) * revamped_ratio * num_comp_stations
+
     return comp_cost_i * cp.compressor_markup
-
-
-def price_breakdown_cols(df: pd.DataFrame, pos: list = None, neg: list = None) -> float:
-    """
-    Sum up positive and negative colums for cost breakdown
-    """
-    if pos is None:
-        pos = []
-    if neg is None:
-        neg = []
-
-    return sum([df[x] for x in pos]) - sum([df[x] for x in neg])
 
 
 def meter_reg_station_cost(cp: Costing_params, demands_MW: list) -> float:
@@ -564,16 +358,26 @@ def ili_check_interp(cp: Costing_params, dn: int) -> float:
     return cp.ili_cost[dn]
 
 
-def ili_costs_file(valve_cost_file: str) -> dict:
+def ili_costs_file(ili_cost_file: str) -> dict:
     """
     Import ILI costs file
     """
 
-    with open(valve_cost_file, newline="") as csvfile:
+    with open(ili_cost_file, newline="") as csvfile:
         next(csvfile)
         reader = csv.DictReader(csvfile)
         ili_dict = {int(x["DN"]): float(x["ILI cost [2020$/mi]"]) for x in reader}
     return ili_dict
+
+
+def inline_regulator_costs_file(inline_regulator_cost_file: str) -> dict[float, float]:
+    with open(inline_regulator_cost_file, newline="") as csvfile:
+        reader = csv.DictReader(csvfile)
+        inline_reg_dict = {
+            float(x["regulator_pressure_limit_bar"]): float(x["regulator_cost"])
+            for x in reader
+        }
+    return inline_reg_dict
 
 
 def valve_replacement_cost_file(file: str) -> dict:
@@ -596,24 +400,12 @@ def valve_replacement_cost_file(file: str) -> dict:
 def valve_replacement_cost(
     cp: Costing_params, pipe_added: list, loc_class: int, v_type: str = "buried"
 ) -> float:
-    """
-    Calculate replacement cost of valves
-    """
-    #   Establish valve spacing interval as function of Class Location as per ASME B31.12
-    # Dict format with key being class location
-    ASMEB3112_valve_spacing = {
-        1: 20,
-        2: 15,
-        3: 10,
-        4: 5,
-    }
-
-    if loc_class not in ASMEB3112_valve_spacing.keys():
+    ASMEB3112_valve_spacing = {1: 20, 2: 15, 3: 10, 4: 5}
+    if loc_class not in ASMEB3112_valve_spacing:
         raise ValueError(
             f"Location class value is not valid. {loc_class} was given. Must be in {ASMEB3112_valve_spacing.keys()}"
         )
     spacing = ASMEB3112_valve_spacing[loc_class]
-
     if v_type not in ["buried"]:
         raise ValueError(f"Valve type must be 'buried', {v_type} was given")
     ref_data = cp.valve_cost[v_type]

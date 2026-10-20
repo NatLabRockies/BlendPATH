@@ -34,6 +34,7 @@ PIPE_STR = {
 #     "X65": {"SMYS": 450, "SMTS": 535},
 #     "X70": {"SMYS": 485, "SMTS": 570},
 # }
+_POLYMER_CODES = ["PE", "PA"]
 _STEEL_GRADE_CODES = ["X"]
 
 
@@ -51,7 +52,7 @@ def get_pipe_grades() -> list:
     """
     Get all available pipe grades
     """
-    return [val for val in PIPE_STR.keys() if val not in ["B", "X46"]]
+    return [val for val in PIPE_STR if val not in ["B", "X46"]]
 
 
 def get_SMYS_SMTS(grade: str) -> tuple:

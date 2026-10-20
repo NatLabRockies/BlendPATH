@@ -18,17 +18,25 @@ authors = [
     {name="Burcin Cakir Erdener",email="Burcin.CakirErdener@nlr.gov"},
     {name="Kevin Topolski",email="Kevin.Topolski@nlr.gov"},
 ]
-version = '2.1.1'
+version = '3.0'
 readme = "README.md"
-requires-python  = ">=3.10, <3.14"
+requires-python  = ">=3.11, <3.14"
 dependencies = [
     "numpy",
     "pandas",
     "cantera",
     "importlib_resources",
+    "geopandas",
     "scipy",
+    "shapely",
     "xlsxwriter",
+    "openpyxl",
+    "pandas",
     "ProFAST",
-    "pytest",
     "python_calamine"
+]
+
+[project.optional-dependencies]
+develop = [
+    "pytest",
 ]

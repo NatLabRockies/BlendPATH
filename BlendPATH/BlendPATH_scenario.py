@@ -7,7 +7,7 @@ import BlendPATH.modifications.mod_util as bp_mod_util
 import BlendPATH.util.pipe_assessment as bp_pa
 from BlendPATH.emissions.emissions import calc_emissions_intensity
 from BlendPATH.emissions.emissions_params import EmissionsParams
-from BlendPATH.network import BlendPATH_network
+from BlendPATH.network import BlendPATH_network, network_segmenting
 from BlendPATH.scenario_helper import (
     _SCENARIO_INPUTS,
     SCENARIO_VALUES,
@@ -64,9 +64,10 @@ class BlendPATH_scenario:
         # Set design option
         self.update_design_option(self.design_option, init=True)
 
-        # Segmentation
-        if self.scenario_type == Scenario_type.TRANSMISSION:
-            self.network.pipe_segments = self.network.segment_pipe()
+        # Segmentation (aggregating hydraulically connected pipes into pipe segments)
+        self.network.pipe_segments = network_segmenting.segment_pipe(
+            network=self.network
+        )
 
         # Blend in hydrogen
         self.blendH2(network_params.blend, self.costing_params.h2_price, True)
@@ -74,8 +75,8 @@ class BlendPATH_scenario:
     def run_mod(
         self,
         mod_type: str,
-        design_option: str = None,
-        option: str = None,
+        design_option: str | None = None,
+        option: str | None = None,
         allow_compressor_bypass: bool = True,
     ) -> float:
         """
@@ -116,6 +117,7 @@ class BlendPATH_scenario:
             costing_params=self.costing_params,
             option=option,
             allow_compressor_bypass=allow_compressor_bypass,
+            original_sm3_s=self.original_sm3_s,
         )
 
         # Import modified network and run simulation
@@ -131,9 +133,11 @@ class BlendPATH_scenario:
 
         # Get the parameters that go into LCOT calculation
         mod_costing_params = bp_mod_util.get_mod_costing_params(
+            original_network=self.network,
             network=new_network,
             design_params=self.design_params,
             costing_params=self.costing_params,
+            mod_result=mod_result,
         )
 
         price_breakdown, pf_inputs = bp_cost.calc_lcot(
@@ -199,16 +203,26 @@ class BlendPATH_scenario:
             mod_result=mod_result,
             mod_type=self.mod_type,
         )
-        bp_res_file.write_comp_sheet(
-            workbook=workbook,
-            network=self.network,
-            new_network=new_network,
-            mod_result=mod_result,
-            mod_type=self.mod_type,
-        )
+        is_distribution = self.scenario_type == Scenario_type.DISTRIBUTION
+        if is_distribution:
+            bp_res_file.write_regulators_sheet(
+                workbook=workbook, new_network=new_network
+            )
+        if not (is_distribution and not new_network.compressors):
+            bp_res_file.write_comp_sheet(
+                workbook=workbook,
+                network=self.network,
+                new_network=new_network,
+                mod_result=mod_result,
+                mod_type=self.mod_type,
+            )
         bp_res_file.write_pressure_sheet(workbook=workbook, new_network=new_network)
         bp_res_file.write_demand_sheet(workbook=workbook, new_network=new_network)
         bp_res_file.write_profast_sheet(workbook=workbook, pf_inputs=pf_inputs)
+        if self.scenario_type == Scenario_type.DISTRIBUTION:
+            bp_res_file.write_capital_sheet(
+                workbook=workbook, mod_costing_params=mod_costing_params
+            )
 
         ### Closeout
         bp_file_w.file_closeout(workbook=workbook)
@@ -272,6 +286,16 @@ class BlendPATH_scenario:
             self.casestudy_name,
             self.costing_params.financial_overrides,
         )
+
+    @property
+    def max_velocity_distribution(self):
+        return self.design_params.max_dist_velocity
+
+    @max_velocity_distribution.setter
+    def max_velocity_distribution(self, value):
+        for formatting_fxn in _SCENARIO_INPUTS["max_velocity_distribution"].formatting:
+            value = formatting_fxn(value)
+        self.design_params.max_dist_velocity = value
 
     @property
     def location_class(self):
@@ -470,6 +494,16 @@ class BlendPATH_scenario:
         self.costing_params.financial_overrides = value
 
     @property
+    def polymer_cost_type(self):
+        return self.costing_params.polymer_cost_type
+
+    @polymer_cost_type.setter
+    def polymer_cost_type(self, value):
+        for formatting_fxn in _SCENARIO_INPUTS["polymer_cost_type"].formatting:
+            value = formatting_fxn(value)
+        self.costing_params.polymer_cost_type = value
+
+    @property
     def steel_cost(self):
         return self.costing_params.steel_cost
 
@@ -537,3 +571,96 @@ class BlendPATH_scenario:
 
         self._design_option = value
         self.update_design_option(value)
+
+    @property
+    def original_sm3_s(self):
+        original_blend = self.network.composition.x.get("H2", 0)
+        self.network.blendH2(blend=0)
+        sm3_s = 0
+        for d in self.network.demand_nodes.values():
+            rho, _ = d.node.composition.get_rho_z(
+                p_gauge_pa=0, x=d.node.x_h2, mw=d.node.mw
+            )
+            sm3_s += d.flowrate_mdot / rho
+        self.network.blendH2(blend=original_blend)
+        return sm3_s
+
+    @property
+    def odorant_cost(self):
+        return self.costing_params.odorant_cost
+
+    @odorant_cost.setter
+    def odorant_cost(self, value):
+        self.costing_params.odorant_cost = value
+
+    @property
+    def supply_regulator_cost(self):
+        return self.costing_params.supply_regulator_cost
+
+    @supply_regulator_cost.setter
+    def supply_regulator_cost(self, value):
+        self.costing_params.supply_regulator_cost = value
+
+    @property
+    def regulator_blend_limit(self):
+        return self.costing_params.regulator_blend_limit
+
+    @regulator_blend_limit.setter
+    def regulator_blend_limit(self, value):
+        self.costing_params.regulator_blend_limit = value
+
+    @property
+    def msa_blend_limit(self):
+        return self.costing_params.msa_blend_limit
+
+    @msa_blend_limit.setter
+    def msa_blend_limit(self, value):
+        self.costing_params.msa_blend_limit = value
+
+    @property
+    def valve_blend_limit(self):
+        return self.costing_params.valve_blend_limit
+
+    @valve_blend_limit.setter
+    def valve_blend_limit(self, value):
+        self.costing_params.valve_blend_limit = value
+
+    @property
+    def valve_cost(self):
+        return self.costing_params.valve_cost
+
+    @valve_cost.setter
+    def valve_cost(self, value):
+        self.costing_params.valve_cost = value
+
+    @property
+    def valve_density(self):
+        return self.costing_params.valve_density
+
+    @valve_density.setter
+    def valve_density(self, value):
+        self.costing_params.valve_density = value
+
+    @property
+    def valve_replacement_fraction(self):
+        return self.costing_params.valve_replacement_fraction
+
+    @valve_replacement_fraction.setter
+    def valve_replacement_fraction(self, value):
+        self.costing_params.valve_replacement_fraction = value
+
+    @property
+    def regulator_maintenance_fraction(self):
+        return self.costing_params.regulator_maintenance_fraction
+
+    @regulator_maintenance_fraction.setter
+    def regulator_maintenance_fraction(self, value):
+        self.costing_params.regulator_maintenance_fraction = value
+
+    @property
+    def regulator_refurbishment_fraction(self):
+        return self.costing_params.regulator_refurbishment_fraction
+
+    @regulator_refurbishment_fraction.setter
+    def regulator_refurbishment_fraction(self, value):
+        self.costing_params.regulator_refurbishment_fraction = value

@@ -3,7 +3,7 @@
 [![DOI 10.11578/dc.20240216.1](https://img.shields.io/badge/DOI-10.11578%2Fdc.20240216.1-brightgreen?link=https://doi.org/10.11578/dc.20240216.1)](https://www.osti.gov/biblio/2309692)
 [![DOI 10.11578/dc.20240216.1](https://img.shields.io/badge/DOI-10.2172%2F2583524-brightgreen?link=https://doi.org/10.2172/2583524)](https://www.osti.gov/biblio/2583524)
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![Python](https://img.shields.io/badge/python-3.10_|_3.11_|_3.12_|_3.13-blue)]()
+[![Python](https://img.shields.io/badge/python-3.11_|_3.12_|_3.13-blue)]()
 
 [![Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
@@ -22,10 +22,10 @@ git clone https://github.com/natlabrockies/BlendPATH.git
 ```
 
 ## Create environment
-A conda environoment can useful for satisfying the Python requirement. First, open an anaconda powershell. Within the powershell, we will first create a conda environment to install BlendPATH in. This command below creates a conda environment called `BlendPATH_env`. The second argument is the Python version. The BlendPATH team recommends Python 3.10 or 3.11.  Note: you may swap `BlendPATH_env` with whatever you would like to name the environment
+A conda environoment can useful for satisfying the Python requirement. First, open an anaconda powershell. Within the powershell, we will first create a conda environment to install BlendPATH in. This command below creates a conda environment called `BlendPATH_env`. The second argument is the Python version. The BlendPATH team recommends Python 3.11.  Note: you may swap `BlendPATH_env` with whatever you would like to name the environment
 
 ```console
-conda create -n BlendPATH_env python=3.10
+conda create -n BlendPATH_env python=3.11
 ```
 
 Within the same powershell, enter into the conda environment using
@@ -35,7 +35,10 @@ conda activate BlendPATH_env
 ```
 
 ## Installation
-BlendPATH is built as a Python package that can be installed with pip. Once the conda environment is activated, navigate the directory where the BlendPATH repository was cloned. In most cases this will be in a designated GitHub folder.
+BlendPATH is built as a Python package that can be installed with pip. 
+
+### Using source code
+Once the conda environment is activated, navigate the directory where the BlendPATH repository was cloned. In most cases this will be in a designated GitHub folder.
 
 ```console
 cd \Users\MY_USERNAME\Documents\GitHub\BlendPATH
@@ -45,6 +48,13 @@ Then install BlendPATH using the command below. Be sure to include the period at
 
 ```console
 pip install .
+```
+
+### Using PyPI
+
+Alternatively, BlendPATH can be accessed through PyPI
+```console
+pip install blendpath
 ```
 
 # VS Code setup
@@ -69,7 +79,7 @@ BlendPATH continues to see active development and maintenance. If you observe is
 # Citation
 
 ```bibtex
-   @techreport{kee2024BlendPATH,
+   @software{kee2024BlendPATH,
      title = {{BlendPATH (Blending Pipeline Analysis Tool for Hydrogen) [SWR-24-10]}},
      author = {Kee, Jamie and Reznicek, Evan and Chung, Mark and Topolski, Kevin},
      year = {2024},
@@ -77,6 +87,11 @@ BlendPATH continues to see active development and maintenance. If you observe is
      number = {BlendPATH},
      institution = {{National Renewable Energy Laboratory (NREL), Golden, CO (United States)}},
      doi = {10.11578/dc.20240216.1},
-     url = {https://www.osti.gov/biblio/2309692},
+     url = {https://www.osti.gov/biblio/code-117221},
     }
 ```
+
+# Publications
+
+ - Kee, Jamie, et al. "Techno-economic analysis of repurposing natural gas transmission pipeline networks to accommodate hydrogen blends." Energy Environ. Sci. (2026) 19 (15): 5152–5179. https://doi.org/10.1039/d5ee07416a
+  - Kee, Jamie, et al. "Blending Pipeline Analysis Tool for Hydrogen (BlendPATH) Documentation and User Manual." , Jul. 2025. https://doi.org/10.2172/2583524 

@@ -1,6 +1,8 @@
+import numpy as np
+
 import BlendPATH.Global as gl
 
-from .Node import Node
+from .node import Node
 
 
 class Demand_node:
@@ -8,27 +10,26 @@ class Demand_node:
     A network node that has a specified energy flow rate
     """
 
-    node: Node
-    name: str = ""
-    flowrate_MW: float = 0
-    min_pressure_mpa_g: float = 0.0
-
     def __init__(
         self,
         node: Node,
         name: str = "",
         flowrate_MW: float = 0,
         min_pressure_mpa_g: float = 0.0,
+        blend_limit: float | None = None,
     ):
         self.node = node
         self.name = name
         self.flowrate_MW = flowrate_MW
         self.min_pressure_mpa_g = min_pressure_mpa_g
+        self.blend_limit = (
+            float(blend_limit) if blend_limit is not None else blend_limit
+        )
 
         self.recalc_mdot()
         self.node.is_demand = True
 
-    def recalc_mdot(self, hhv: float = None) -> None:
+    def recalc_mdot(self, hhv: float | None = None) -> None:
         """
         Calculate the new flow rate based on the HHV
         """

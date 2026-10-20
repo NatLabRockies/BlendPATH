@@ -51,6 +51,8 @@ _VALID_COLS = {
         "diameter_mm": col_entry(formatting=[cast_float]),
         "rating_code": col_entry(formatting=[str_uppercase]),
         "thickness_mm": col_entry(formatting=[cast_float]),
+        "velocity_limit": col_entry(formatting=[cast_float]),
+        "design_factor": col_entry(formatting=[cast_float]),
     },
     SheetName.NODES: {
         "node_name": col_entry(),
@@ -73,6 +75,7 @@ _VALID_COLS = {
         "from_node": col_entry(),
         "to_node": col_entry(),
         "pressure_out_mpa_g": col_entry(formatting=[cast_float]),
+        "blend_limit": col_entry(),
     },
     SheetName.SUPPLY: {
         "supply_name": col_entry(),
@@ -86,6 +89,7 @@ _VALID_COLS = {
         "node_name": col_entry(),
         "flowrate_MW": col_entry(default=0.0, formatting=[cast_float]),
         "min_pressure_mpa_g": col_entry(default=0.0, formatting=[cast_float]),
+        "blend_limit": col_entry(),
     },
     SheetName.COMPOSITION: {
         "SPECIES": col_entry(),

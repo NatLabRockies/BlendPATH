@@ -1,11 +1,13 @@
-from typing import Literal, Union, get_args
+from typing import TYPE_CHECKING, Literal, Union, get_args
 
 import cantera as ct
 import numpy as np
 
-# Local BlendPATH helpers -----------------------------------------------------
-from . import Composition
 from . import cantera_util as ctu
+
+# Local BlendPATH helpers -----------------------------------------------------
+if TYPE_CHECKING:
+    from .composition import Composition
 
 # Optional: CoolProp for GERG-2008 -------------------------------------------
 try:
@@ -57,7 +59,7 @@ _CP_PROP_UNITFIX = {
 def get_rz(
     p_gauge: float = ct.one_atm,
     T_K: float = 273.15,
-    X: Composition = None,
+    X: "Composition" = None,
     eos: _EOS_OPTIONS = "rk",
     mw: float = 0.0,
 ) -> tuple[float, float]:

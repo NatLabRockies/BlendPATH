@@ -98,7 +98,7 @@ def direct_replacement(
                 for th_i, th in enumerate(th_valid):
                     if (
                         not schedule_valid
-                        or schedule_valid[th_i] is np.nan
+                        or schedule_valid[th_i] is np.nan  # noqa: PLW0177
                         or pressure_valid[th_i] > 20.0
                     ):
                         continue
@@ -119,14 +119,14 @@ def direct_replacement(
     # Run LCOT sweep
     lcot_vals = []
 
-    seg_options_slim = [seg_options[i] for i, v in enumerate(seg_options) if v]
+    seg_options_slim = [v for v in seg_options if v]
     valid_options = []
     if seg_options_slim:
         valid_options = list(set.intersection(*map(set, seg_options_slim)))
 
-    sn_orig = network.supply_nodes[list(network.supply_nodes.keys())[0]]
+    sn_orig = network.supply_nodes[next(iter(network.supply_nodes.keys()))]
     orig_supply_pressure = sn_orig.pressure_mpa
-    sn_orig_node = nw.supply_nodes[list(nw.supply_nodes.keys())[0]].node
+    sn_orig_node = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))].node
 
     # First try to solve the original network, maybe no changes needed
     no_change = False
@@ -165,7 +165,7 @@ def direct_replacement(
 
     comp_pipe_changes = {}
     if not no_change:
-        sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
+        sn = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))]
 
         # Get compressor bypass options
         comp_bypass = bp_mod_util.get_comp_bypass(
@@ -236,19 +236,17 @@ def direct_replacement(
                                 pipe.thickness_mm = design.th
                                 pipe.DN = design.dn
                                 total_length_km += pipe.length_km
-                            if ps_i > 0:
-                                if nw.pipe_segments[ps_i - 1].comps:
-                                    comp = nw.pipe_segments[ps_i - 1].comps[0]
-                                    comp.pressure_out_mpa_g = design.pressure
+                            if ps_i > 0 and nw.pipe_segments[ps_i - 1].comps:
+                                comp = nw.pipe_segments[ps_i - 1].comps[0]
+                                comp.pressure_out_mpa_g = design.pressure
                         else:
                             for pipe in ps.pipes:
                                 pipe.diameter_mm = og_pipe_vals[ps_i]["diameter_mm"]
                                 pipe.thickness_mm = og_pipe_vals[ps_i]["thickness_mm"]
                                 pipe.DN = og_pipe_vals[ps_i]["DN"]
-                            if ps_i > 0:
-                                if nw.pipe_segments[ps_i - 1].comps:
-                                    comp = nw.pipe_segments[ps_i - 1].comps[0]
-                                    comp.pressure_out_mpa_g = pipe.design_pressure_MPa
+                            if ps_i > 0 and nw.pipe_segments[ps_i - 1].comps:
+                                comp = nw.pipe_segments[ps_i - 1].comps[0]
+                                comp.pressure_out_mpa_g = pipe.design_pressure_MPa
 
                     inlet_pressure = (
                         design.pressure
@@ -281,6 +279,7 @@ def direct_replacement(
                                 composition=sn.node.composition,
                                 pressure=orig_supply_pressure * gl.MPA2PA,
                                 is_supply=True,
+                                plot_xy=sn.node.plot_xy,
                             )
                             supply_comp = bp_plc.Compressor(
                                 name="Supply compressor",
@@ -350,6 +349,7 @@ def direct_replacement(
                             new_pipe_cap = cost + sum(anl_cap.values())
 
                             mod_costing_params = bp_mod_util.get_mod_costing_params(
+                                original_network=None,
                                 network=nw,
                                 design_params=design_params,
                                 costing_params=costing_params,
@@ -369,7 +369,7 @@ def direct_replacement(
                                     design,
                                     max(max_cr) if max_cr else np.nan,
                                     cost,
-                                    "Supply compressor" in nw.compressors.keys(),
+                                    "Supply compressor" in nw.compressors,
                                     supp_p=supp_p,
                                     combo=combo,
                                     comp_bypass=bypass_combo,
@@ -383,13 +383,13 @@ def direct_replacement(
                             pass
                         finally:
                             # reset supply node and compressor if needed
-                            if "Supply compressor" in nw.compressors.keys():
+                            if "Supply compressor" in nw.compressors:
                                 sn_node = nw.supply_nodes[
-                                    list(nw.supply_nodes.keys())[0]
+                                    next(iter(nw.supply_nodes.keys()))
                                 ]
                                 sn_node.node = sn_orig_node
-                                sn_node.pressure = network.supply_nodes[
-                                    list(network.supply_nodes.keys())[0]
+                                sn_node.pressure_mpa = network.supply_nodes[
+                                    next(iter(network.supply_nodes.keys()))
                                 ].pressure_mpa
                                 nw.compressors.pop("Supply compressor")
                                 nw.nodes.pop("new_supply_node_comp")
@@ -437,7 +437,7 @@ def direct_replacement(
                 "name",
             ]
         }
-        for x in nw.pipes.keys()
+        for x in nw.pipes
     }
     if not no_change:
         for ps_i, ps in enumerate(network.pipe_segments):
@@ -590,20 +590,16 @@ def make_result_file(
         # These values don't change from DR method
         new_pipes["pipe_name"].append(pipe.name)
         new_pipes["from_node"].append(
-            pipe.from_node.name
-            if pipe.from_node.name not in bypass_swaps
-            else bypass_swaps[pipe.from_node.name]
+            bypass_swaps.get(pipe.from_node.name, pipe.from_node.name)
         )
 
         new_pipes["to_node"].append(
-            pipe.to_node.name
-            if pipe.to_node.name not in bypass_swaps
-            else bypass_swaps[pipe.to_node.name]
+            bypass_swaps.get(pipe.to_node.name, pipe.to_node.name)
         )
         new_pipes["length_km"].append(pipe.length_km)
         new_pipes["roughness_mm"].append(pipe.roughness_mm)
         # These values update
-        repd = pipe.name in min_cost.keys()
+        repd = pipe.name in min_cost
         inner_diam = min_cost[pipe.name].inner_diameter if repd else pipe.diameter_mm
         thickness = min_cost[pipe.name].th if repd else pipe.thickness_mm
         grade = min_cost[pipe.name].grade if repd else pipe.grade
@@ -622,11 +618,14 @@ def make_result_file(
         for pipe in node.connections["Pipe"]:
             min_cost_val = (
                 min_cost[pipe.name].pressure
-                if pipe.name in min_cost.keys()
+                if pipe.name in min_cost
                 else pipe.design_pressure_MPa
             )
             p_max = min(p_max, min_cost_val)
         new_nodes["p_max_mpa_g"].append(p_max)
+        x, y = node.plot_xy
+        new_nodes["plot_x"].append(x)
+        new_nodes["plot_y"].append(y)
 
     # Make new supply
     new_supply = {x: [] for x in mod_file_util.supply_cols()}
@@ -640,7 +639,7 @@ def make_result_file(
         new_supply["blend"].append(nw.composition.x["H2"])
 
     if add_supply_comp:
-        sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
+        sn = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))]
 
         # Add new compressor
         new_comps["compressor_name"].insert(0, "Supply compressor")
@@ -656,7 +655,7 @@ def make_result_file(
         for pipe in sn.node.connections["Pipe"]:
             min_cost_val = (
                 min_cost[pipe.name].pressure
-                if pipe.name in min_cost.keys()
+                if pipe.name in min_cost
                 else pipe.design_pressure_MPa
             )
             p_max = min(p_max, min_cost_val)
@@ -665,10 +664,13 @@ def make_result_file(
         # Add new node
         new_nodes["node_name"].insert(0, "Supply compressor from_node")
         new_nodes["p_max_mpa_g"].insert(0, p_max)
+        sx, sy = sn.node.plot_xy
+        new_nodes["plot_x"].insert(0, sx)
+        new_nodes["plot_y"].insert(0, sy)
 
         # Update supply node
         new_supply["node_name"][-1] = "Supply compressor from_node"
-        new_supply["pressure_mpa_g"][-1] = supply.pressure_mpa
+        new_supply["pressure_mpa_g"][-1] = sn.pressure_mpa
         new_supply["blend"][-1] = nw.composition.x["H2"]
 
     # Make new demands

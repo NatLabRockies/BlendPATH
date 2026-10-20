@@ -72,10 +72,12 @@ def get_pipe_other_cost(
         return all_other_cost
     d_in = d_mm * gl.MM2IN
     l_mi = l_km * gl.KM2MI
+
     per_in_mi_costs = {x: 0 for x in anl_types}
+    pipe_overrides = cp.pipe_cost_override or {}
     for x in per_in_mi_costs.keys():
-        if x in cp.pipe_cost_override.keys():
-            per_in_mi_costs[x] = cp.pipe_cost_override[x]
+        if x in pipe_overrides:
+            per_in_mi_costs[x] = pipe_overrides[x]
         else:
             per_in_mi_costs[x] = get_ANL_costs_in_mi(
                 diameter_mm=d_mm, length_km=l_km, region=cp.region, c_type=x

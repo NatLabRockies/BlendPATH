@@ -180,9 +180,20 @@ INPUTS = {
         (("YES", False), False),
     ],
     "scenario_type": [
+        (("distribution", False), "distribution"),
         (("transmission", False), "transmission"),
         (("TransmissioN", False), "transmission"),
         (("asff", True), ValueError),
+    ],
+    "polymer_cost_type": [
+        (("socal", False), "socal"),
+        (("nexant_rural", False), "nexant_rural"),
+        (("SOCAL", False), "socal"),
+        (("asff", True), ValueError),
+    ],
+    "max_velocity_distribution": [
+        ((15, False), 15),
+        (("15", False), 15),
     ],
 }
 

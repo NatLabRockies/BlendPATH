@@ -162,7 +162,7 @@ def parallel_loop(
                             DN=dn,
                         )
                         # Skip if no viable schedules with this grade
-                        if schedule is np.nan:
+                        if schedule is np.nan:  # noqa: PLW0177
                             continue
 
                         # Get inner and outer diameters
@@ -172,8 +172,8 @@ def parallel_loop(
                         # Loop through supply pressures
                         supp_p_min_res = []
                         for sup_p in supp_p_list:
-                            loop_network, loop_length, m_dot_seg, comp_out, p_out = (
-                                get_loop_length2(
+                            loop_network, loop_length, m_dot_seg, _, p_out = (
+                                get_loop_length(
                                     d_loop=d_inner_mm,
                                     th=th,
                                     l_total=l_total,
@@ -348,6 +348,12 @@ def add_pipe_segments(
     nodes = {}
     pipes = {}
 
+    def _interp_xy(xy1, xy2, frac):
+        return (
+            xy1[0] + frac * (xy2[0] - xy1[0]),
+            xy1[1] + frac * (xy2[1] - xy1[1]),
+        )
+
     pipes[p_name] = bp_plc.Pipe(
         name=p_name,
         from_node=from_node,
@@ -364,11 +370,20 @@ def add_pipe_segments(
         length_sub_segment = gl.SEG_MAX * (diameter_mm * gl.MM2M) / gl.KM2M
         n_nodes = int(np.floor(length_km / length_sub_segment))
         length_sub_segment = length_km / (n_nodes + 1)
+
+        orig_from_xy = from_node.plot_xy
+        orig_to_xy = to_node.plot_xy
+
         for subseg in range(n_nodes):
             new_node_name = f"{node_base_name}_subseg_{subseg}"
+            frac = ((subseg + 1) * length_sub_segment) / length_km
+            frac = min(max(frac, 0.0), 1.0)
+            new_xy = _interp_xy(orig_from_xy, orig_to_xy, frac)
+
             nodes[new_node_name] = bp_plc.Node(
                 name=new_node_name,
                 composition=composition,
+                plot_xy=new_xy,
                 _report_out=False,
             )
             to_node = nodes[new_node_name]
@@ -385,8 +400,10 @@ def add_pipe_segments(
             )
             pipes[new_pipe_name]._parent_pipe = p_name
             from_node = to_node
+
         pipes[p_name].from_node = from_node
         pipes[p_name].length_km = length_sub_segment
+
     return nodes, pipes
 
 
@@ -416,6 +433,7 @@ def make_loop_network(
     n_ds_in = bp_plc.Node(
         name="in",
         composition=composition,
+        plot_xy=(0.0, 0.0),
     )
     nodes = {n_ds_in.name: n_ds_in}
     # Initialize pipes, demands, supplies
@@ -443,6 +461,7 @@ def make_loop_network(
         nodes[name] = bp_plc.Node(
             name=name,
             composition=composition,
+            plot_xy=(float(cumsum_offtakes[ot_i + 1]), 0.0),
         )
         node_index += 1
         d_name = f"demand_{ot_i}"
@@ -477,6 +496,7 @@ def make_loop_network(
             nodes[l_cxn_name] = bp_plc.Node(
                 name=l_cxn_name,
                 composition=composition,
+                plot_xy=(float(l_loop), 0.0),
             )
             node_index += 1
 
@@ -554,15 +574,15 @@ def make_loop_network(
         # Compressor will compress to this node. Demand node will be updated
 
         # Add node after compressor
+        final_demand_node_name = f"demand_{len(all_mdot) - 1}"
+        prev_final_node = demands[final_demand_node_name].node
         final_node_name = "final_node"
         nodes[final_node_name] = bp_plc.Node(
             name=final_node_name,
             composition=composition,
+            plot_xy=prev_final_node.plot_xy,
         )
         # Update demand to be the final node
-
-        final_demand_node_name = f"demand_{len(all_mdot) - 1}"
-        prev_final_node = demands[final_demand_node_name].node
         demands[final_demand_node_name].node = nodes[final_node_name]
         # Add the compressor
         compressors[comp_name] = bp_plc.Compressor(
@@ -655,6 +675,27 @@ def make_result_file(
 ) -> list:
     new_nodes = {x: [] for x in mod_file_util.nodes_cols()}
 
+    def _append_node(store, name, p_max, xy):
+        store["node_name"].append(name)
+        store["p_max_mpa_g"].append(p_max)
+        store["plot_x"].append(xy[0])
+        store["plot_y"].append(xy[1])
+
+    def _interp_pipe_xy(pipe, dist_from_pipe_start_km):
+
+        x1, y1 = pipe.from_node.plot_xy
+        x2, y2 = pipe.to_node.plot_xy
+        if [x for x in [x1, y1, x2, y2] if x is None]:
+            return (None, None)
+        if pipe.length_km <= 0:
+            return (x1, y1)
+        frac = dist_from_pipe_start_km / pipe.length_km
+        frac = min(max(frac, 0.0), 1.0)
+        return (
+            x1 + frac * (x2 - x1),
+            y1 + frac * (y2 - y1),
+        )
+
     new_pipes = {x: [] for x in mod_file_util.pipes_cols()}
 
     pipe_segments = generateNewPipeSegments(
@@ -704,8 +745,7 @@ def make_result_file(
         for node in pipe_segments[ps_i].nodes:
             if not node._report_out or node.name in bypass_swaps:
                 continue
-            new_nodes["node_name"].append(node.name)
-            new_nodes["p_max_mpa_g"].append(p_max_seg)
+            _append_node(new_nodes, node.name, p_max_seg, node.plot_xy)
 
         # Add pipes until past the offtake length
         l_added = 0
@@ -721,21 +761,21 @@ def make_result_file(
 
                 # Get index of node before loop cxn
                 insert_ind = new_nodes["node_name"].index(
-                    pipe.to_node.name
-                    if pipe.to_node.name not in bypass_swaps
-                    else bypass_swaps[pipe.to_node.name]
+                    bypass_swaps.get(pipe.to_node.name, pipe.to_node.name)
                 )
                 # Add new node for loop connection
+                pre_pipe_len = loop_length - l_added
+                loop_cxn_xy = _interp_pipe_xy(pipe, pre_pipe_len)
+
                 new_nodes["node_name"].insert(insert_ind, loop_cxn_name)
                 new_nodes["p_max_mpa_g"].insert(insert_ind, p_max_seg)
+                new_nodes["plot_x"].insert(insert_ind, loop_cxn_xy[0])
+                new_nodes["plot_y"].insert(insert_ind, loop_cxn_xy[1])
 
                 # Add segmented pipe prior to loop cxn
-                pre_pipe_len = loop_length - l_added
                 new_pipes["pipe_name"].append(f"{pipe.name}_pre_loop_cxn")
                 new_pipes["from_node"].append(
-                    pipe.from_node.name
-                    if pipe.from_node.name not in bypass_swaps
-                    else bypass_swaps[pipe.from_node.name]
+                    bypass_swaps.get(pipe.from_node.name, pipe.from_node.name)
                 )
                 new_pipes["to_node"].append(loop_cxn_name)
                 new_pipes["length_km"].append(pre_pipe_len)
@@ -759,9 +799,7 @@ def make_result_file(
                 new_pipes["pipe_name"].append(f"{pipe.name}_post_loop_cxn")
                 new_pipes["from_node"].append(loop_cxn_name)
                 new_pipes["to_node"].append(
-                    pipe.to_node.name
-                    if pipe.to_node.name not in bypass_swaps
-                    else bypass_swaps[pipe.to_node.name]
+                    bypass_swaps.get(pipe.to_node.name, pipe.to_node.name)
                 )
                 new_pipes["length_km"].append(pipe_l - pre_pipe_len)
                 new_pipes["roughness_mm"].append(pipe.roughness_mm)
@@ -774,14 +812,10 @@ def make_result_file(
                 # add pipe as normal
                 new_pipes["pipe_name"].append(pipe.name)
                 new_pipes["from_node"].append(
-                    pipe.from_node.name
-                    if pipe.from_node.name not in bypass_swaps
-                    else bypass_swaps[pipe.from_node.name]
+                    bypass_swaps.get(pipe.from_node.name, pipe.from_node.name)
                 )
                 new_pipes["to_node"].append(
-                    pipe.to_node.name
-                    if pipe.to_node.name not in bypass_swaps
-                    else bypass_swaps[pipe.to_node.name]
+                    bypass_swaps.get(pipe.to_node.name, pipe.to_node.name)
                 )
                 new_pipes["length_km"].append(pipe.length_km)
                 new_pipes["roughness_mm"].append(pipe.roughness_mm)
@@ -832,7 +866,7 @@ def make_result_file(
         new_demand["flowrate_MW"].append(demand.flowrate_MW)
 
     if add_supply_comp:
-        sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
+        sn = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))]
 
         # Add new compressor
         new_comps["compressor_name"].insert(0, "Supply compressor")
@@ -852,6 +886,9 @@ def make_result_file(
         # Add new node
         new_nodes["node_name"].insert(0, "Supply compressor from_node")
         new_nodes["p_max_mpa_g"].insert(0, p_max)
+        sx, sy = sn.node.plot_xy
+        new_nodes["plot_x"].insert(0, sx)
+        new_nodes["plot_y"].insert(0, sy)
 
         # Update supply node
         new_supply["node_name"][-1] = "Supply compressor from_node"
@@ -926,7 +963,6 @@ def generateNewPipeSegments(
             # Keep last for any length calculations need prior
             # pps[-1].length_km += ps.length_km
             pps[-1].pipes.extend(ps.pipes)
-            pass
 
         else:
             pps.append(copy.deepcopy(ps))
@@ -936,7 +972,7 @@ def generateNewPipeSegments(
     return pps
 
 
-def get_loop_length2(
+def get_loop_length(
     d_loop: float,
     th: float,
     l_total: float,
@@ -970,12 +1006,14 @@ def get_loop_length2(
         except (ValueError, RuntimeError) as err_val:
             p_vals.append(0)
             l_vals.append(l_loop)
-            if err_val.args[0] in ["Negative pressure", "Pressure below threshold"]:
+            if (
+                err_val.args[0] in ["Negative pressure", "Pressure below threshold"]
+                and l_loop == l_total
+            ):
                 # If negative or low pressure is achieved with 100% looping then
                 # less looping will only make it more negative (higher pressure drop)
                 # Thus this diameter/grade is not valid
-                if l_loop == l_total:
-                    return return_nan_loop_length()
+                return return_nan_loop_length()
             continue
         p_vals.append(end_node.pressure)
         l_vals.append(l_loop)
@@ -1096,6 +1134,7 @@ def make_loop_network2(
     n_ds_in = bp_plc.Node(
         name="in",
         composition=seg_params.composition,
+        plot_xy=(0.0, 0.0),
     )
     nodes = {n_ds_in.name: n_ds_in}
     # Initialize pipes, demands, supplies
@@ -1123,7 +1162,7 @@ def make_loop_network2(
     prev_length = 0
     for val in all_lengths:
         length = val.length_km
-        same_node = length - prev_length == 0
+        same_node = abs(length - prev_length) < 1e-6
         # If current item is a offtake, connect the previous node to this offtake
         if val.val_type == "offtake":
             if same_node:
@@ -1135,7 +1174,9 @@ def make_loop_network2(
             else:
                 node_name = f"ot_node_{ot_i}"
                 nodes[node_name] = bp_plc.Node(
-                    name=node_name, composition=seg_params.composition
+                    name=node_name,
+                    composition=seg_params.composition,
+                    plot_xy=(float(length), 0.0),
                 )
                 d_name = f"demand_{ot_i}"
                 demands[d_name] = bp_plc.Demand_node(
@@ -1163,7 +1204,9 @@ def make_loop_network2(
             if not same_node:
                 node_name = f"diam_change_node_{diam_index}"
                 nodes[node_name] = bp_plc.Node(
-                    name=node_name, composition=seg_params.composition
+                    name=node_name,
+                    composition=seg_params.composition,
+                    plot_xy=(float(length), 0.0),
                 )
                 nodes_tmp, pipes_tmp = add_pipe_segments(
                     p_name=f"pipe_to_diam_change_{diam_index}",
@@ -1201,7 +1244,9 @@ def make_loop_network2(
             else:
                 node_name = "loop_cxn"
                 nodes[node_name] = bp_plc.Node(
-                    name=node_name, composition=seg_params.composition
+                    name=node_name,
+                    composition=seg_params.composition,
+                    plot_xy=(float(length), 0.0),
                 )
                 nodes_tmp, pipes_tmp = add_pipe_segments(
                     p_name="main_2_loop_cxn",
@@ -1243,15 +1288,15 @@ def make_loop_network2(
         # Compressor will compress to this node. Demand node will be updated
 
         # Add node after compressor
+        final_demand_node_name = f"demand_{len(seg_params.offtakes_mdot) - 1}"
+        prev_final_node = demands[final_demand_node_name].node
         final_node_name = "final_node"
         nodes[final_node_name] = bp_plc.Node(
             name=final_node_name,
             composition=seg_params.composition,
+            plot_xy=prev_final_node.plot_xy,
         )
         # Update demand to be the final node
-
-        final_demand_node_name = f"demand_{len(seg_params.offtakes_mdot) - 1}"
-        prev_final_node = demands[final_demand_node_name].node
         demands[final_demand_node_name].node = nodes[final_node_name]
         # Add the compressor
         compressors[comp_name] = bp_plc.Compressor(
@@ -1340,12 +1385,12 @@ def get_segment_results(
         new_pipe_cap = anl_cap_sum + loop_cost
 
     # Check if supply compressor needed
-    sn = nw.supply_nodes[list(nw.supply_nodes.keys())[0]]
+    sn = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))]
     orig_supply_pressure = min(sn.pressure_mpa, seg_params.design_pressure_MPa)
 
     add_supply_comp = False
     supply_comp_inputs = None
-    if sn.node.name in seg_params.ps_nodes and orig_supply_pressure < sup_p:
+    if sn.node.name in seg_params.ps_nodes and sup_p - orig_supply_pressure > 1e-6:
         add_supply_comp = True
         supply_comp_inputs = bp_mod_util.Add_supply_comp_inputs(
             blend=sn.blend,
@@ -1357,6 +1402,7 @@ def get_segment_results(
         )
 
     mod_costing_params = bp_mod_util.get_mod_costing_params(
+        original_network=None,
         network=loop_network,
         design_params=seg_params.design_params,
         costing_params=seg_params.costing_params,

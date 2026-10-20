@@ -3,7 +3,7 @@ import numpy as np
 import BlendPATH.costing.costing as bp_cost
 import BlendPATH.Global as gl
 
-from .Node import Node
+from .node import Node
 
 
 class Compressor:
@@ -38,6 +38,15 @@ class Compressor:
         self.eta_driver_elec_used = np.nan
 
         self.to_node.pressure = self.pressure_out_mpa_g * gl.MPA2PA
+
+        # --- Flow / fuel bookkeeping (needed by Supply_node.mdot) ---
+        # flow_mdot: main gas flow through the compressor (kg/s)
+        # fuel_mdot: fuel extracted from the gas stream (kg/s) if fuel_extract=True
+        self.flow_mdot = 0.0  # (kg/s)
+        self.fuel_mdot = 0.0  # (kg/s)
+        self.fuel_w = 0.0  # (W) fuel-driver power
+        self.fuel_electric_W = 0.0  # (W) electric-driver power
+        self.shaft_power_MW = 0.0  # (MW) shaft power (reporting)
 
     @property
     def compression_ratio(self) -> float:
@@ -82,7 +91,9 @@ class Compressor:
         driver_fuel_rate_W = 0
         if W_dot_shaft > 0:
             if not self.fuel_extract:
-                if np.isnan(self.eta_driver_elec):
+                if self.eta_driver_elec is None or np.isnan(
+                    float(self.eta_driver_elec)
+                ):
                     kW_shaft = W_dot_shaft / gl.KW2W
                     eta_coefs = [
                         0.7617,

@@ -17,7 +17,7 @@ def pipes_cols() -> list:
 
 
 def nodes_cols() -> list:
-    return ["node_name", "p_max_mpa_g"]
+    return ["node_name", "p_max_mpa_g", "plot_x", "plot_y"]
 
 
 def comps_cols() -> list:
@@ -116,7 +116,6 @@ def write_to_network_file(
                         row, 0, [_clean_val(new_comps[col][loc]) for col in columns]
                     )
                     row += 1
-
                 except ValueError:
                     pass
         else:

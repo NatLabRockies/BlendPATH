@@ -1,7 +1,7 @@
 import BlendPATH.Global as gl
 
-from .Demand_node import Demand_node
-from .Node import Node
+from .demand_node import Demand_node
+from .node import Node
 
 
 class Supply_node(Demand_node):

@@ -44,7 +44,7 @@ class Node:
         """
         Add pipe or compressor cxn to node
         """
-        if isinstance(cxn, (bp_plc.Pipe, bp_plc.Steel_pipe)):
+        if isinstance(cxn, (bp_plc.Pipe, bp_plc.Steel_pipe, bp_plc.Polymer_pipe)):
             self.connections["Pipe"].append(cxn)
         elif isinstance(cxn, bp_plc.Compressor):
             self.connections["Comp"].append(cxn)
@@ -97,7 +97,7 @@ class Node:
         Molecular weight (kg/kmol).
         """
 
-        return self.composition.get_mw(p_gauge_pa=self.pressure, x=self.x_h2)
+        return self.composition.get_mw(p_gauge_pa=self.pressure or 0, x=self.x_h2)
 
     @property
     def mu(self):

@@ -99,6 +99,6 @@ def test_pressure_at_reg(setup_reg_network):
 def test_pressure_at_reg_min(setup_reg_network):
     setup_reg_network.regulators["reg"].pressure_out_mpa_g = 13.34
     setup_reg_network.solve(c_relax=3)
-    assert (
-        setup_reg_network.nodes["n2"].pressure == setup_reg_network.nodes["n1"].pressure
+    assert setup_reg_network.nodes["n2"].pressure == pytest.approx(
+        setup_reg_network.nodes["n1"].pressure
     )

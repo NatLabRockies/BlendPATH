@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 import cantera as ct
 import numpy as np
+from shapely.geometry import LineString, MultiLineString
 
 import BlendPATH.costing.costing as bp_cost
 import BlendPATH.costing.pipe_costs.steel_pipe_costs as bp_pipe_cost
@@ -54,6 +55,153 @@ class h2_pipe_solution:
     l_compressors: list = field(default_factory=list)
 
 
+def get_ordered_route_nodes(network: BlendPATH_network) -> list[bp_plc.Node]:
+    """
+    Return the linear route node sequence starting from the first supply node.
+    Assumes the network is effectively linear for the new_h2_pipeline use case.
+    Compressors are traversed as zero-length links.
+    """
+    start = next(iter(network.supply_nodes.values())).node
+    ordered = [start]
+    visited = {start.name}
+
+    current = start
+    prev_name = None
+
+    while True:
+        next_candidates = []
+
+        for pipe in current.connections["Pipe"]:
+            neighbor = pipe.to_node if pipe.from_node is current else pipe.from_node
+            if neighbor.name != prev_name:
+                next_candidates.append(neighbor)
+
+        for comp in current.connections["Comp"]:
+            neighbor = comp.to_node if comp.from_node is current else comp.from_node
+            if neighbor.name != prev_name:
+                next_candidates.append(neighbor)
+
+        next_candidates = [n for n in next_candidates if n.name not in visited]
+
+        if not next_candidates:
+            break
+
+        if len(next_candidates) > 1:
+            raise ValueError(
+                "new_h2_pipeline parallel route generation currently expects a linear route."
+            )
+
+        nxt = next_candidates[0]
+        ordered.append(nxt)
+        visited.add(nxt.name)
+        prev_name = current.name
+        current = nxt
+
+    return ordered
+
+
+def build_parallel_route(
+    network: BlendPATH_network,
+    offset_m: float,
+) -> LineString:
+    """
+    Build a parallel-offset LineString from the existing network route.
+    Uses the ordered node coordinates of the existing network.
+    """
+    ordered_nodes = get_ordered_route_nodes(network)
+    coords = []
+
+    for node in ordered_nodes:
+        xy = getattr(node, "plot_xy", None)
+        if [x for x in xy if x is None]:
+            coords.append((None, None))
+            return LineString()
+        # if xy is None:
+        #     raise ValueError(
+        #         f"Node '{node.name}' is missing plot_xy; cannot build parallel H2 route."
+        #     )
+        coords.append((float(xy[0]), float(xy[1])))
+
+    base_line = LineString(coords)
+    offset_geom = base_line.parallel_offset(offset_m, side="left", join_style=2)
+
+    if isinstance(offset_geom, MultiLineString):
+        offset_geom = max(offset_geom.geoms, key=lambda g: g.length)
+
+    if offset_geom.is_empty:
+        raise ValueError("Parallel offset route could not be generated.")
+
+    if offset_geom.geom_type != "LineString":
+        raise ValueError(
+            f"Expected LineString after offset, got {offset_geom.geom_type}."
+        )
+
+    return offset_geom
+
+
+def get_route_support_fractions(network: BlendPATH_network) -> list[float]:
+    """
+    Return cumulative geometric fractions for the ordered base route nodes.
+
+    These fractions are used to insert support nodes on the parallel-offset route
+    so the new H2 line follows the original corridor bends instead of drawing
+    long straight chords between sparse event nodes.
+    """
+    ordered_nodes = get_ordered_route_nodes(network)
+
+    coords = []
+    for node in ordered_nodes:
+        xy = getattr(node, "plot_xy", None)
+        if [x for x in xy if x is None]:
+            coords.append((None, None))
+            return [0.0]
+        # if xy is None:
+        #     raise ValueError(
+        #         f"Node '{node.name}' is missing plot_xy; cannot derive route support fractions."
+        #     )
+        coords.append((float(xy[0]), float(xy[1])))
+
+    if len(coords) < 2:
+        return [0.0]
+
+    seg_lengths = [LineString([a, b]).length for a, b in zip(coords[:-1], coords[1:])]
+    total = sum(seg_lengths)
+
+    if total <= 0:
+        return [0.0]
+
+    fracs = [0.0]
+    cum = 0.0
+    for seg_len in seg_lengths:
+        cum += seg_len
+        fracs.append(cum / total)
+
+    return fracs
+
+
+def sample_parallel_route_at_chainage(
+    route: LineString,
+    chainage_km: float,
+    total_length_km: float,
+) -> tuple[float, float]:
+    """
+    Sample a point on the parallel route by hydraulic chainage.
+    Uses normalized fraction so hydraulic total length and GIS route length
+    do not have to match exactly.
+    """
+    if not route:
+        return (None, None)
+    if total_length_km <= 0:
+        pt = route.interpolate(0.0)
+        return (float(pt.x), float(pt.y))
+
+    frac = chainage_km / total_length_km
+    frac = min(max(frac, 0.0), 1.0)
+
+    pt = route.interpolate(frac * route.length)
+    return (float(pt.x), float(pt.y))
+
+
 def new_h2_pipeline(
     network: BlendPATH_network,
     design_option: str,
@@ -77,6 +225,13 @@ def new_h2_pipeline(
 
     # Find furthest demand node
     offtake_distance, total_length_km = find_furthest_demand(network=network)
+
+    base_route = build_parallel_route(
+        network=network,
+        offset_m=100.0,
+    )
+
+    support_fracs = get_route_support_fractions(network)
 
     # Miniumu outlet pressure of network
     outlet_pressure_MPa = design_params.final_outlet_pressure_mpa_g
@@ -161,6 +316,9 @@ def new_h2_pipeline(
                     compressor_lengths=compressor_lengths,
                     h2_design_params=h2_design_params,
                     grade=grade,
+                    base_route=base_route,
+                    total_length_km=total_length_km,
+                    support_fracs=support_fracs,
                 )
                 # Attempty to solve network. Raised value errors will retry with +1 compressors
                 try:
@@ -205,6 +363,7 @@ def new_h2_pipeline(
                     # Calculate LCOT for this combination
                     price_breakdown, _ = bp_cost.calc_lcot(
                         mod_costing_params=bp_mod_util.get_mod_costing_params(
+                            original_network=None,
                             network=h2_pipeline_network,
                             design_params=design_params,
                             costing_params=costing_params,
@@ -402,27 +561,32 @@ def make_new_network(
     compressor_lengths: list,
     h2_design_params: new_design_params,
     grade: str,
+    base_route: LineString,
+    total_length_km: float,
+    support_fracs: list[float],
 ) -> tuple[BlendPATH_network, bp_plc.Node]:
-    """Generate new H2 pipeline network
-
-    Args:
-        diam_inner_mm (float): Pipe inner diameter [mm]
-        thickness_mm (float): Pipe thickness [mm]
-        compressor_lengths (list): List of cumulative compressor distances from supply node
-        h2_design_params (new_design_params): Static H2 pipeline design parameters
-        grade (str): Steel grade
-
-    Returns:
-        tuple[BlendPATH_network, bp_plc.Node]: New H2 pipeline network, and the last node in the network
+    """Generate new H2 pipeline network on a parallel-offset version
+    of the existing corridor, including support nodes along the route
+    so the exported line follows the corridor shape.
     """
-    # Setup dicts for network creation. Prepopulate with supply node
+
+    eps = 1e-9
+
+    supply_xy = sample_parallel_route_at_chainage(
+        route=base_route,
+        chainage_km=0.0,
+        total_length_km=total_length_km,
+    )
+
     nodes = {
         "supply_node": bp_plc.Node(
             name="supply_node",
             composition=h2_design_params.composition,
             p_max_mpa_g=h2_design_params.supply_pressure_MPa,
+            plot_xy=supply_xy,
         )
     }
+
     supplys = {
         "supply_node": bp_plc.Supply_node(
             node=nodes["supply_node"],
@@ -431,9 +595,9 @@ def make_new_network(
             name="supply_node",
         )
     }
+
     pipes, compressors, demands = {}, {}, {}
 
-    # Combine lengths to get order of compressors and offtakes
     all_lengths = bp_mod_util.get_sorted_lengths(
         d_main=[],
         l_loop=0,
@@ -444,97 +608,178 @@ def make_new_network(
         cumulative_offtakes=False,
     )
 
-    # Set up indices for nodes, pipes, compressors.
     indexes = IndexTracking()
-    # Tracking length added, for subtracting with cumulative lengths
-    prev_length = 0
-    # Previously added node
+    prev_length = 0.0
     prev_node = nodes["supply_node"]
 
-    # Loop through the offtakes and compressors
+    # support_fracs[0] should be 0.0, so start from 1
+    support_i = 1
+
+    def _add_support_nodes_until(target_length_km: float):
+        nonlocal support_i, prev_length, prev_node
+
+        target_frac = (
+            0.0 if total_length_km <= 0 else target_length_km / total_length_km
+        )
+        target_frac = min(max(target_frac, 0.0), 1.0)
+
+        while (
+            support_i < len(support_fracs)
+            and support_fracs[support_i] < target_frac - eps
+        ):
+            support_length_km = support_fracs[support_i] * total_length_km
+
+            if support_length_km <= prev_length + eps:
+                support_i += 1
+                continue
+
+            support_xy = sample_parallel_route_at_chainage(
+                route=base_route,
+                chainage_km=support_length_km,
+                total_length_km=total_length_km,
+            )
+
+            support_node = add_node(
+                nodes=nodes,
+                h2_design_params=h2_design_params,
+                node_prefix="r",
+                node_index=indexes.node,
+                plot_xy=support_xy,
+            )
+            indexes.node += 1
+
+            add_pipe(
+                pipes=pipes,
+                pipe_index=indexes.pipe,
+                from_node=prev_node,
+                to_node=support_node,
+                length_km=support_length_km - prev_length,
+                diameter_mm=diam_inner_mm,
+                thickness_mm=thickness_mm,
+                roughness_mm=h2_design_params.pipe_roughness_mm,
+                grade=grade,
+            )
+            indexes.pipe += 1
+
+            prev_node = support_node
+            prev_length = support_length_km
+            support_i += 1
+
+    # main event loop: offtakes + compressors
     for val in all_lengths:
-        length = val.length_km
+        length = float(val.length_km)
+
+        # first insert route-support nodes before this event
+        _add_support_nodes_until(length)
+
+        event_xy = sample_parallel_route_at_chainage(
+            route=base_route,
+            chainage_km=length,
+            total_length_km=total_length_km,
+        )
+
         if val.val_type == "offtake":
-            # Add node and demand node
             pipe_to_node = add_node(
                 nodes=nodes,
                 h2_design_params=h2_design_params,
                 node_prefix="ot",
                 node_index=indexes.node,
+                plot_xy=event_xy,
             )
+            indexes.node += 1
+
+            if length > prev_length + eps:
+                add_pipe(
+                    pipes=pipes,
+                    pipe_index=indexes.pipe,
+                    from_node=prev_node,
+                    to_node=pipe_to_node,
+                    length_km=length - prev_length,
+                    diameter_mm=diam_inner_mm,
+                    thickness_mm=thickness_mm,
+                    roughness_mm=h2_design_params.pipe_roughness_mm,
+                    grade=grade,
+                )
+                indexes.pipe += 1
+
             add_offtake(
                 demands=demands,
                 node_index=indexes.dmnd,
                 node=pipe_to_node,
                 flowrate_MW=val.mw,
             )
-            indexes.node += 1
             indexes.dmnd += 1
 
-            # Update nodes
-            next_node = pipe_to_node
+            prev_node = pipe_to_node
+            prev_length = length
 
         elif val.val_type == "comp":
-            # Make compressor from node
-            pipe_to_node = add_node(
-                nodes,
-                h2_design_params,
-                "c",
-                indexes.node,
+            comp_from_node = add_node(
+                nodes=nodes,
+                h2_design_params=h2_design_params,
+                node_prefix="c",
+                node_index=indexes.node,
+                plot_xy=event_xy,
             )
             indexes.node += 1
 
-            # Make compressor to node
+            if length > prev_length + eps:
+                add_pipe(
+                    pipes=pipes,
+                    pipe_index=indexes.pipe,
+                    from_node=prev_node,
+                    to_node=comp_from_node,
+                    length_km=length - prev_length,
+                    diameter_mm=diam_inner_mm,
+                    thickness_mm=thickness_mm,
+                    roughness_mm=h2_design_params.pipe_roughness_mm,
+                    grade=grade,
+                )
+                indexes.pipe += 1
+
             comp_to_node = add_node(
-                nodes,
-                h2_design_params,
-                "c",
-                indexes.node,
+                nodes=nodes,
+                h2_design_params=h2_design_params,
+                node_prefix="c",
+                node_index=indexes.node,
+                plot_xy=event_xy,
             )
             indexes.node += 1
 
-            # Make compressor
             add_compressor(
-                compressors,
-                pipe_to_node,
-                comp_to_node,
-                indexes.comp,
-                h2_design_params.supply_pressure_MPa,
-                h2_design_params,
+                compressors=compressors,
+                from_node=comp_from_node,
+                to_node=comp_to_node,
+                comp_index=indexes.comp,
+                pressure_out_mpa_g=h2_design_params.supply_pressure_MPa,
+                h2_design_params=h2_design_params,
             )
             indexes.comp += 1
 
-            next_node = comp_to_node
+            prev_node = comp_to_node
+            prev_length = length
 
-        # Add connecting pipe
-        add_pipe(
+        else:
+            raise ValueError(f"Unexpected value type in all_lengths: {val.val_type}")
+
+    # add remaining route-support nodes after the last event
+    _add_support_nodes_until(total_length_km)
+
+    return (
+        BlendPATH_network(
+            name="new_network",
             pipes=pipes,
-            pipe_index=indexes.pipe,
-            from_node=prev_node,
-            to_node=pipe_to_node,
-            length_km=length - prev_length,
-            diameter_mm=diam_inner_mm,
-            thickness_mm=thickness_mm,
-            roughness_mm=h2_design_params.pipe_roughness_mm,
-            grade=grade,
-        )
-        # update lengths and node
-        prev_length = length
-        indexes.pipe += 1
-        prev_node = next_node
-
-    return BlendPATH_network(
-        name="new_network",
-        pipes=pipes,
-        nodes=nodes,
-        demand_nodes=demands,
-        supply_nodes=supplys,
-        compressors=compressors,
-        composition=h2_design_params.composition,
-        thermo_curvefit=True,
-        eos=h2_design_params.eos,
-        ff_type=h2_design_params.ff_type,
-    ), prev_node
+            nodes=nodes,
+            demand_nodes=demands,
+            supply_nodes=supplys,
+            compressors=compressors,
+            composition=h2_design_params.composition,
+            thermo_curvefit=True,
+            eos=h2_design_params.eos,
+            ff_type=h2_design_params.ff_type,
+        ),
+        prev_node,
+    )
 
 
 def add_node(
@@ -542,6 +787,7 @@ def add_node(
     h2_design_params: new_design_params,
     node_prefix: str,
     node_index: int,
+    plot_xy: tuple[float, float],
 ) -> bp_plc.Node:
     """Add new node to dict of nodes for network creation
 
@@ -559,6 +805,7 @@ def add_node(
         name=name,
         composition=h2_design_params.composition,
         p_max_mpa_g=h2_design_params.supply_pressure_MPa,
+        plot_xy=plot_xy,
     )
     return nodes[name]
 
@@ -634,20 +881,11 @@ def add_pipe(
     thickness_mm: float,
     roughness_mm: float,
     grade: str,
+    base_route: "LineString" = None,
+    prev_length_km: float = 0.0,
+    curr_length_km: float = 0.0,
+    total_length_km: float = 0.0,
 ) -> None:
-    """Add pipe to pipes dict
-
-    Args:
-        pipes (dict[str, bp_plc.Pipe]): Dict of pipes
-        pipe_index (int): Pipe name incrementer
-        from_node (bp_plc.Node): From node
-        to_node (bp_plc.Node): To node
-        length_km (float): Pipe length [km]
-        diameter_mm (float): Pipe inner diameter [mm]
-        thickness_mm (float): Pipe thickness [mm]
-        roughness_mm (float): Pipe internal roughness [mm]
-        grade (str): Steel grade
-    """
     p_name = f"pipe_{pipe_index}"
     pipes[p_name] = bp_plc.Pipe(
         name=p_name,
@@ -750,6 +988,9 @@ def make_network_file(filename: str, network: BlendPATH_network) -> None:
         if node._report_out:
             new_nodes["node_name"].append(node.name)
             new_nodes["p_max_mpa_g"].append(node.p_max_mpa_g)
+            x, y = node.plot_xy
+            new_nodes["plot_x"].append(x)
+            new_nodes["plot_y"].append(y)
 
     # Make new pipes for network file
     new_pipes = {x: [] for x in mod_file_util.pipes_cols()}

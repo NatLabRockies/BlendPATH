@@ -2,30 +2,32 @@ import copy
 import itertools
 import math
 import os
-from dataclasses import dataclass
-from typing import Any, Literal, Union, get_args
+from dataclasses import dataclass, field
+from typing import Any, Literal, get_args
 
 import cantera as ct
 import numpy as np
 
 import BlendPATH.costing.costing as bp_cost
+import BlendPATH.costing.distribution_network_nonpipe_costs as bp_dist_costs
+import BlendPATH.costing.pipe_costs.polymer_pipe_costs as bp_p_pipe_cost
 import BlendPATH.costing.pipe_costs.steel_pipe_costs as bp_pipe_cost
 import BlendPATH.Global as gl
 import BlendPATH.network.pipeline_components as bp_plc
 import BlendPATH.util.pipe_assessment as bp_pa
+from BlendPATH.costing.profast_util import ProFAST_name_capital
 from BlendPATH.modifications import (
     additional_compressors,
     direct_replacement,
+    direct_replacement_distribution,
     new_h2_pipeline,
     parallel_loop,
+    parallel_loop_distribution,
 )
 from BlendPATH.network import BlendPATH_network
-from BlendPATH.scenario_helper import (
-    SCENARIO_VALUES,
-    Design_params,
-    Scenario_type,
-)
-from BlendPATH.util.pipe_dimensions import _DN_NPS_MAP
+from BlendPATH.scenario_helper import SCENARIO_VALUES, Design_params, Scenario_type
+from BlendPATH.util import plastic_pipe
+from BlendPATH.util.pipe_dimensions import _DN_NPS_MAP, _NPS_DN_MAP
 from BlendPATH.util.schedules import SCHEDULES_PE_ID, SCHEDULES_STEEL_ID
 
 NPS_DIAM_LIST = np.asarray(list(SCHEDULES_PE_ID.keys()))
@@ -49,25 +51,68 @@ class Mod_result:
     cap_cost: dict
     pipe_cost_types: list
     l_comps: list
+    mod_type: str
+    original_sm3_s: float
 
     def __post_init__(self):
         self.n_comps = [len(x) for x in self.l_comps]
 
 
 @dataclass
+class Mod_fixed_costs:
+    ili_costs: float = 0
+    odorization: float = 0
+    regulator_maintenance: float = 0
+    leak_survey: float = 0
+
+
+@dataclass
+class Mod_capital:
+    pipe_capex: float = 0
+    comp_capex: list = field(default_factory=list)
+    revamped_comp_capex: list = field(default_factory=list)
+    supply_comp_capex: float = 0
+    meter_cost: float = 0
+    valve_cost: float = 0
+    msa_cost: float = 0
+    regulator_refurbishment: float = 0
+    supply_regulator_refurbishment: float = 0
+
+    def network_costs(self):
+        return {
+            ProFAST_name_capital.NEW_PIPE: self.pipe_capex,
+            ProFAST_name_capital.NEW_COMPR: sum(self.comp_capex),
+            ProFAST_name_capital.REFURB_COMPR: sum(self.revamped_comp_capex),
+            ProFAST_name_capital.SUPPLY_COMPR: self.supply_comp_capex,
+            ProFAST_name_capital.METER_TRANS: self.meter_cost,
+            ProFAST_name_capital.VALVE: self.valve_cost,
+            ProFAST_name_capital.REG_REFURB: self.regulator_refurbishment,
+            ProFAST_name_capital.SUPPLY_REG: self.supply_regulator_refurbishment,
+        }
+
+    def user_costs(self):
+        return {
+            ProFAST_name_capital.MSA_DIST: self.msa_cost,
+        }
+
+
+@dataclass
+class Mod_feedstocks:
+    all_fuel_usage: float = 0
+    all_fuel_elec: float = 0
+    supply_comp_fuel: dict[str, float] = field(
+        default_factory=lambda: {"gas": 0, "elec": 0}
+    )
+    all_fuel_MW: float = 0
+    all_fuel_elec_kW: float = 0
+
+
+@dataclass
 class Mod_costing_params:
-    all_fuel_usage: float
-    all_fuel_elec: float
-    supply_comp_fuel: dict
-    comp_capex: float
-    revamped_comp_capex: float
-    supply_comp_capex: float
-    meter_cost: float
-    ili_costs: float
-    valve_cost: float
-    all_fuel_MW: float
-    all_fuel_elec_kW: float
     capacity: float
+    capital: Mod_capital
+    fixed_costs: Mod_fixed_costs
+    feedstocks: Mod_feedstocks
 
 
 @dataclass
@@ -160,12 +205,13 @@ def mod_network_file_name(
 def mod_handler(
     mod_type: _MOD_TYPES,
     network: BlendPATH_network,
-    design_option: Union[str, float],
+    design_option: str | float,
     new_filename_full: str,
     design_params: Design_params,
     costing_params: bp_cost.Costing_params,
     option: Any = None,
     allow_compressor_bypass: bool = False,
+    original_sm3_s: float = 0,
 ) -> Mod_result:
     if network.scenario_type == Scenario_type.TRANSMISSION:
         mod_type_handler = {
@@ -174,6 +220,16 @@ def mod_handler(
             "ac": additional_compressors.additional_compressors,
             "newh2": new_h2_pipeline.new_h2_pipeline,
         }
+    elif network.scenario_type == Scenario_type.DISTRIBUTION:
+        mod_type_handler = {
+            "dr": direct_replacement_distribution.direct_replacement_distribution,
+            "pl": parallel_loop_distribution.parallel_loop_distribution,
+        }
+        if option in [2, "2"]:
+            mod_type_handler = {
+                "dr": direct_replacement_distribution.direct_replacement_distribution_alt,
+                "pl": parallel_loop_distribution.parallel_loop_distribution_alt,
+            }
     if mod_type not in mod_type_handler:
         raise RuntimeError(
             f"Unknown modification method {mod_type} for scenario_type {network.scenario_type}"
@@ -200,6 +256,8 @@ def mod_handler(
         cap_cost=cap_cost,
         pipe_cost_types=pipe_cost_types,
         l_comps=l_comps,
+        mod_type=mod_type,
+        original_sm3_s=original_sm3_s,
     )
 
 
@@ -216,6 +274,8 @@ def get_pipe_cost_types(mod_type: _MOD_TYPES, scenario_type: str) -> list:
             return []
         elif mod_type == "newh2":
             return ["Labor", "Misc", "ROW"]
+    elif scenario_type == Scenario_type.DISTRIBUTION:
+        return []
 
     raise RuntimeError(
         f"Unknown modification method {mod_type} for scenario type {scenario_type}"
@@ -259,11 +319,126 @@ def generate_modified_network(
     return new_network
 
 
-def get_mod_costing_params_transmission(
+def get_mod_costing_params_distribution(
+    original_network: BlendPATH_network,
     network: BlendPATH_network,
     design_params: Design_params,
     costing_params: bp_cost.Costing_params,
-    supply_comp_inputs: Union[None, Add_supply_comp_inputs] = None,
+    mod_result: Mod_result | None,
+    supply_comp_inputs: None | Add_supply_comp_inputs = None,
+) -> Mod_costing_params:
+
+    blend = network.composition.x.get("H2", 0)
+    new_pipe_length = sum([p.length for p in mod_result.new_pipes.values()])
+    total_pipe_length = sum([p.length_km for p in network.pipes.values()])
+
+    # Get all demands
+    demands_cfh = []
+    demand_pressures_psi_g = []
+    for demand_node in network.demand_nodes.values():
+        blend_limit = (
+            original_network.demand_nodes[demand_node.name].blend_limit
+            if original_network.demand_nodes[demand_node.name].blend_limit is not None
+            else costing_params.msa_blend_limit
+        )
+        if blend < blend_limit:
+            continue
+        demands_cfh.append(
+            demand_node.flowrate_mdot / demand_node.node.rho * gl.M32FT3 * gl.S2HR
+        )
+        demand_pressures_psi_g.append(demand_node.node.pressure / gl.PSI2PA)
+    # Meter set assembly cost
+    msa_cost = bp_dist_costs.get_msa_cost(
+        flowrate_cfh=np.asarray(demands_cfh),
+        pressure_psig=np.full_like(demand_pressures_psi_g, 0.0),
+    )
+
+    # Gas pressure regulation and metering station
+    # gprms_cost = bp_dist_costs.get_gprms_cost()
+
+    # Gas pressure regulation and metering station
+    # original_blend = network.composition.x.get("H2", 0)
+    additional_m3_s = -mod_result.original_sm3_s
+    # for b_i, b in enumerate([0, original_blend]):
+    #     network.blendH2(blend=b)
+    for d in network.demand_nodes.values():
+        rho, _ = d.node.composition.get_rho_z(p_gauge_pa=0, x=d.node.x_h2, mw=d.node.mw)
+        # if b_i == 0:
+        additional_m3_s += d.flowrate_mdot / rho
+        # else:
+        #     additional_m3_s += d.flowrate_mdot / rho
+    odorization = bp_dist_costs.get_odorization_cost(
+        sm3_s=additional_m3_s,
+        costing_params=costing_params,
+        blend=blend,
+    )
+
+    # Regulators
+    # n_supply_regulator_refurbishment = sum(
+    #     1 for sn in network.supply_nodes.values() if sn.blend > blend
+    # )
+
+    supply_regulator_refurbishment = bp_dist_costs.get_regulator_refubishment_cost(
+        supply_nodes=network.supply_nodes, blend=blend, costing_params=costing_params
+    )
+    # # This is the same as no blending?
+    # regulator_maintenance = bp_dist_costs.get_regulator_maintenance_cost(
+    #     n_regulators=n_regulator_refurbishment
+    # )
+    leak_survey = bp_dist_costs.get_leak_survey_cost(
+        new_pipe_length=new_pipe_length,
+        mod_type=mod_result.mod_type,
+    )
+
+    valves = bp_dist_costs.get_valve_cost(
+        total_pipe_length=total_pipe_length, costing_params=costing_params, blend=blend
+    )
+    inline_regulator_refurbishment_cost = (
+        bp_dist_costs.get_inline_regulator_refurbishment_cost(
+            original_regulators=original_network.regulators,
+            regulators=network.regulators,
+            blend=blend,
+            costing_params=costing_params,
+        )
+    )
+    inline_regulator_maintenance_cost = (
+        bp_dist_costs.get_inline_regulator_maintenance_cost(
+            regulator_cost=inline_regulator_refurbishment_cost,
+            costing_params=costing_params,
+        )
+    )
+
+    # O&M
+    # o_and_m = bp_dist_costs.get_o_and_m_cost(
+    #     cost_type="AGA_bundled",
+    #     pipe_km=new_pipe_length,
+    # )
+
+    return Mod_costing_params(
+        capacity=network.capacity_MMBTU_day,
+        feedstocks=Mod_feedstocks(),
+        fixed_costs=Mod_fixed_costs(
+            odorization=odorization,
+            regulator_maintenance=inline_regulator_maintenance_cost,
+            leak_survey=leak_survey,
+        ),
+        capital=Mod_capital(
+            pipe_capex=mod_result.cap_cost["total cost"],
+            valve_cost=valves,
+            msa_cost=msa_cost,
+            regulator_refurbishment=inline_regulator_refurbishment_cost,
+            supply_regulator_refurbishment=supply_regulator_refurbishment,
+        ),
+    )
+
+
+def get_mod_costing_params_transmission(
+    original_network: BlendPATH_network,
+    network: BlendPATH_network,
+    design_params: Design_params,
+    costing_params: bp_cost.Costing_params,
+    mod_result: Mod_result | None = None,
+    supply_comp_inputs: None | Add_supply_comp_inputs = None,
 ) -> Mod_costing_params:
     capacity = network.capacity_MMBTU_day
 
@@ -316,7 +491,7 @@ def get_mod_costing_params_transmission(
     all_pipes_len = []
     pipe_dns_lens = {}
     for pipe in network.pipes.values():
-        if pipe.DN in pipe_dns_lens.keys():
+        if pipe.DN in pipe_dns_lens:
             pipe_dns_lens[pipe.DN] += pipe.length_km
         else:
             pipe_dns_lens[pipe.DN] = pipe.length_km
@@ -345,39 +520,51 @@ def get_mod_costing_params_transmission(
     supply_comp_fuel["elec"] = supply_comp_fuel["elec"] / capacity * gl.DAY2HR
 
     return Mod_costing_params(
-        all_fuel_usage=all_fuel_usage,
-        all_fuel_elec=all_fuel_elec,
-        supply_comp_fuel=supply_comp_fuel,
-        comp_capex=comp_capex,
-        revamped_comp_capex=revamped_comp_capex,
-        supply_comp_capex=supply_comp_capex,
-        meter_cost=meter_cost,
-        ili_costs=ili_costs,
-        valve_cost=valve_cost,
-        all_fuel_MW=all_fuel_MW,
-        all_fuel_elec_kW=all_fuel_elec_kW,
         capacity=network.capacity_MMBTU_day,
+        feedstocks=Mod_feedstocks(
+            all_fuel_usage=all_fuel_usage,
+            all_fuel_elec=all_fuel_elec,
+            supply_comp_fuel=supply_comp_fuel,
+            all_fuel_MW=all_fuel_MW,
+            all_fuel_elec_kW=all_fuel_elec_kW,
+        ),
+        fixed_costs=Mod_fixed_costs(
+            ili_costs=ili_costs,
+        ),
+        capital=Mod_capital(
+            # pipe_capex=mod_result.cap_cost["total cost"],
+            comp_capex=comp_capex,
+            revamped_comp_capex=revamped_comp_capex,
+            supply_comp_capex=supply_comp_capex,
+            meter_cost=meter_cost,
+            valve_cost=valve_cost,
+        ),
     )
 
 
 mod_costing_handler = {
+    Scenario_type.DISTRIBUTION: get_mod_costing_params_distribution,
     Scenario_type.TRANSMISSION: get_mod_costing_params_transmission,
 }
 
 
 def get_mod_costing_params(
+    original_network: BlendPATH_network,
     network: BlendPATH_network,
     design_params: Design_params,
     costing_params: bp_cost.Costing_params,
-    supply_comp_inputs: Union[None, Add_supply_comp_inputs] = None,
+    mod_result: Mod_result | None = None,
+    supply_comp_inputs: None | Add_supply_comp_inputs = None,
 ):
     if network.scenario_type not in mod_costing_handler:
         raise ValueError(f"Unknown scenario type {network.scenario_type}")
     return mod_costing_handler[network.scenario_type](
+        original_network=original_network,
         network=network,
         design_params=design_params,
         costing_params=costing_params,
         supply_comp_inputs=supply_comp_inputs,
+        mod_result=mod_result,
     )
 
 
@@ -395,20 +582,82 @@ def compressor_eta(design_params: Design_params):
     return assign_eta_s, assign_eta_driver
 
 
-def check_velocity_violation(pipe, limit):
+def check_velocity_violation(pipe: bp_plc.Pipe, limit):
     """
     Function to determine if a pipe is violating any velocity constraints
     Returns False if violation exists. otherwise True
     """
+    # This is a calculation, so save the value
     max_pipe_velocity = pipe.v_max
-    # Check against specific user limit
-    if max_pipe_velocity > limit:
-        return False
-    # Erosional velocity
-    if max_pipe_velocity > pipe.erosional_velocity_ASME:
-        return False
-    # TODO: static velocity
-    return True
+
+    return not any(
+        (
+            max_pipe_velocity > limit,
+            max_pipe_velocity > pipe.erosional_velocity_ASME,
+            pipe.velocity_limit is not None and max_pipe_velocity > pipe.velocity_limit,
+        )
+    )
+
+
+def get_polymer_combined_pipe_stats(
+    updated_pipes: dict, costing_params: bp_cost.Costing_params
+):
+    combined_pipe = {
+        x: []
+        for x in [
+            "D_S_G",
+            "DN",
+            "NPS",
+            "sch",
+            "grade",
+            "length",
+            "mat_cost",
+            "other_pipe_cost",
+            "total cost",
+        ]
+    }
+    for new_pipe in updated_pipes.values():
+        new_pipe.cost = calculate_polymer_pipe_cost(
+            cost_type=costing_params.polymer_cost_type,
+            nps_diam_in=new_pipe.nps,
+            length_km=new_pipe.length,
+        )
+        if new_pipe.D_S_G in combined_pipe["D_S_G"]:
+            dsg_ind = combined_pipe["D_S_G"].index(new_pipe.D_S_G)
+            combined_pipe["length"][dsg_ind] += new_pipe.length
+            combined_pipe["mat_cost"][dsg_ind] += new_pipe.cost
+        else:
+            combined_pipe["DN"].append(new_pipe.dn)
+            combined_pipe["NPS"].append(new_pipe.nps)
+            combined_pipe["sch"].append(new_pipe.schedule)
+            combined_pipe["grade"].append(new_pipe.grade)
+            combined_pipe["D_S_G"].append(new_pipe.D_S_G)
+            combined_pipe["length"].append(new_pipe.length)
+            combined_pipe["mat_cost"].append(new_pipe.cost)
+
+    return combined_pipe
+
+
+def calculate_polymer_pipe_cost(
+    cost_type: str, nps_diam_in: float, length_km: float
+) -> float:
+    """Calculate polymer pipe cost based on cost correlation
+
+    Args:
+        cost_type (str): Cost correlation to use (e.g., socal)
+        nom_diam_in (float): Nominal diameter [in]
+        length (float): Length [km]
+
+    Returns:
+        float: Total pipe material cost
+    """
+    return (
+        bp_p_pipe_cost.get_polymer_pipe_cost_per_ft(
+            cost_type=cost_type, nps_diam_in=nps_diam_in
+        )
+        * length_km
+        * gl.KM2FT
+    )
 
 
 @dataclass
@@ -417,21 +666,61 @@ class pipe_diam_params:
     nps: float
     dn: float
     pressure_rating_MPa: float
-    material: Literal["steel"]
+    material: Literal["steel", "polymer"]
     design_option: float
     design_params: Design_params
     grade: str = None
+    polymer: str = None
+    polymer_designation: str = None
+
+
+def get_next_diameter_polymer(
+    pipe_params_in: pipe_diam_params,
+    allow_existing_geom: bool = False,
+) -> tuple[float, float, float]:
+    """
+    Function to get the next largest diameter
+    """
+
+    if allow_existing_geom and pipe_params_in.nps in NPS_DIAM_LIST:
+        return (pipe_params_in.inner_diameter_mm, 0, 0, 0, 0)
+
+    for next_NPS in range(2):
+        # Get index of DN greater than or equal.
+        # Increase by i in the case that the diameters in the DN are not larger than the current diameter
+        nps_diam_index = np.argmax(NPS_DIAM_LIST >= pipe_params_in.nps) + next_NPS
+        if nps_diam_index >= len(NPS_DIAM_LIST):
+            raise RuntimeError("Did not find next diameter")
+        nps_diam = NPS_DIAM_LIST[nps_diam_index]
+        for i, inner_diameter in enumerate(
+            SCHEDULES_PE_ID[nps_diam]["diameter_mm"][::-1]
+        ):
+            if inner_diameter > pipe_params_in.inner_diameter_mm:
+                th = SCHEDULES_PE_ID[nps_diam]["thickness_mm"][::-1][i]
+                pressure_rating = plastic_pipe.design_pressure_thermoplastic(
+                    design_factor=pipe_params_in.design_option,
+                    sdr=round(inner_diameter / th, 2),
+                    polymer=pipe_params_in.polymer,
+                    polymer_designation=pipe_params_in.polymer_designation,
+                )
+                if pressure_rating >= pipe_params_in.pressure_rating_MPa:
+                    return (
+                        inner_diameter,
+                        nps_diam,
+                        _NPS_DN_MAP[nps_diam],
+                        th,
+                        pressure_rating,
+                    )
+    raise RuntimeError("Did not find next diameter")
 
 
 def get_next_diameter_steel(
     pipe_params_in: pipe_diam_params,
     allow_existing_geom: bool = False,
 ):
-    pass
 
-    if allow_existing_geom:
-        if pipe_params_in.dn in DN_DIAM_LIST:
-            return (pipe_params_in.inner_diameter_mm, 0, 0, 0, 0)
+    if allow_existing_geom and pipe_params_in.dn in DN_DIAM_LIST:
+        return (pipe_params_in.inner_diameter_mm, 0, 0, 0, 0)
 
     SMYS, SMTS = bp_pa.get_SMYS_SMTS(pipe_params_in.grade)
     design_factor = bp_pa.get_design_factor(
@@ -475,7 +764,10 @@ def get_next_diameter_steel(
     raise RuntimeError("Did not find next diameter")
 
 
-_get_next_diameter_by_type = {"steel": get_next_diameter_steel}
+_get_next_diameter_by_type = {
+    "steel": get_next_diameter_steel,
+    "polymer": get_next_diameter_polymer,
+}
 
 
 def get_next_diameter(
@@ -608,9 +900,11 @@ class LengthVal:
 def get_supply_pressure_list(nw: BlendPATH_network, ps: bp_plc.PipeSegment, ps_i: int):
     # Setup the list to loop thru supply pressures
     supp_p_list = [ps.design_pressure_MPa]
+    if ps.design_pressure_MPa == ps.design_pressure_MPa:
+        return supp_p_list
     # Only relevant for first segment
     if ps_i == 0:
-        og_pressure = nw.supply_nodes[list(nw.supply_nodes.keys())[0]].pressure_mpa
+        og_pressure = nw.supply_nodes[next(iter(nw.supply_nodes.keys()))].pressure_mpa
 
         # This takes integer values between the original
         # pressure and the MAOP
@@ -678,4 +972,6 @@ class Segment_params:
         self.offtakes_length = self.ps.offtake_lengths.copy()
         if self.offtakes_length[-1] == 0:
             self.offtakes_length = self.offtakes_length[:-1]
+        self.offtakes_length = [round(v, 12) for v in self.offtakes_length]
+        self.offtakes_length = [round(v, 12) for v in self.offtakes_length]
         self.offtakes_length = [round(v, 12) for v in self.offtakes_length]

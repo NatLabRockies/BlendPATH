@@ -1,17 +1,18 @@
 from enum import IntEnum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 import cantera as ct
 import numpy as np
 import numpy.typing as npt
 
 import BlendPATH.Global as gl
+import BlendPATH.util.erosion_rate
 from BlendPATH.network.pipeline_components import friction_factor
 
 from . import cantera_util as ctu
 
 if TYPE_CHECKING:
-    from .Node import Node
+    from .node import Node
 
 
 class Pipe:
@@ -33,6 +34,8 @@ class Pipe:
         ff_type: friction_factor.FF_TYPES = "hofer",
         grade: str | None = None,
         material: str | None = None,
+        velocity_limit: float | None = None,
+        design_factor: float | None = None,
     ):
         self.from_node = from_node
         self.to_node = to_node
@@ -48,6 +51,10 @@ class Pipe:
         self.grade = grade
         self._parent_pipe = None
         self.material = material
+        self.velocity_limit = velocity_limit
+        self.design_factor = (
+            float(design_factor) if design_factor is not None else design_factor
+        )
 
     def get_derivative(self, coef: float, p_eqn: float) -> float:
         """
@@ -123,25 +130,24 @@ class Pipe:
         coef = A * (mw / z_avg / ctu.R_GAS / gl.T_FIXED * D / self.f / L) ** (0.5)
 
         p_eqn = p_in**2 - p_out**2
-        if p_eqn < 1e-6:
-            p_eqn = 1e-6
+        p_eqn = max(p_eqn, 1e-6)
 
         return coef, p_eqn
 
     @property
-    def v_from(self) -> Union[float, None]:
+    def v_from(self) -> float | None:
         return abs(self.m_dot) / self.from_node.rho / self.A_m2
 
     @property
-    def v_to(self) -> Union[float, None]:
+    def v_to(self) -> float | None:
         return abs(self.m_dot) / self.to_node.rho / self.A_m2
 
     @property
-    def v_avg(self) -> Union[float, None]:
+    def v_avg(self) -> float | None:
         return (self.v_from + self.v_to) / 2
 
     @property
-    def v_max(self) -> Union[float, None]:
+    def v_max(self) -> float | None:
         return max(self.v_from, self.v_to)
 
     @property
@@ -149,6 +155,10 @@ class Pipe:
         p_in = self.from_node.pressure + ct.one_atm
         p_out = self.to_node.pressure + ct.one_atm
         return 2 / 3 * (p_in + p_out - p_in * p_out / (p_in + p_out)) - ct.one_atm
+
+    @property
+    def p_max(self) -> float:
+        return max(self.from_node.pressure, self.to_node.pressure)
 
     @property
     def direction(self) -> float:
@@ -191,6 +201,21 @@ class Pipe:
         u = 100 / np.sqrt(rho * KG2LB / M32FT3)
         u_m_s = u * FT2M
         return u_m_s  # m/s
+
+    @property
+    def erosional_velocity_RPO501(self) -> float:
+        """
+        Calculate DNV RP O501 erosion rate
+        """
+        rho_avg = np.mean([x.rho for x in [self.from_node, self.to_node]])
+        return BlendPATH.util.erosion_rate.erosion_rate_velocity(
+            diameter_mm=self.diameter_mm,
+            thickness_mm=self.thickness_mm,
+            fraction_of_thickness=0.1,
+            years=50,
+            rho_g=rho_avg,
+            material=self.material,
+        )
 
     @property
     def A_m2(self) -> float:

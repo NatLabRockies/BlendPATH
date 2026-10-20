@@ -1,19 +1,19 @@
 import logging
+import re
 from collections import defaultdict, deque
 from os.path import isfile
 from pathlib import Path
-from typing import Literal, Union, get_args
+from typing import Literal, Self, get_args
 
 import cantera as ct
 import numpy as np
 import numpy.typing as npt
-import scipy.sparse
-import scipy.sparse.linalg
 
 import BlendPATH.file_writing.file_writing as bp_file_w
 import BlendPATH.file_writing.network_file_out_util as bp_network_file
 import BlendPATH.Global as gl
 import BlendPATH.network.network_import as bp_ni
+import BlendPATH.network.network_plotting
 import BlendPATH.network.network_solving_util as network_util
 import BlendPATH.network.pipeline_components.cantera_util as ctu
 from BlendPATH.costing.costing import Costing_params
@@ -26,27 +26,27 @@ from BlendPATH.scenario_helper import (
     Design_params,
     Scenario_type,
 )
-from BlendPATH.util.pipe_assessment import PIPE_STR, ASME_consts
+from BlendPATH.util.pipe_assessment import _POLYMER_CODES, PIPE_STR, ASME_consts
 from BlendPATH.util.pipe_helper import parent_pipe_helper
 
 logger = logging.getLogger(__name__)
 
 
 class BlendPATH_network:
-    """
-    Hydraulic network
+    """BlendPATH network - this holds the network vertices (nodes, supply nodes, demand nodes) and branches (pipes, compressors, regulators).
+    Networks have a single composition object. But the blend at each node may vary. Networks can be customized with equation of state (eos), curve_fit, coposition_tracking, scenario_type, ff_type.
     """
 
     def __init__(
         self,
         composition: plc.Composition,
         name: str = "",
-        pipes: dict | None = None,
-        nodes: dict | None = None,
-        demand_nodes: dict | None = None,
-        supply_nodes: dict | None = None,
-        compressors: dict | None = None,
-        regulators: dict | None = None,
+        pipes: dict[str, plc.Pipe] | None = None,
+        nodes: dict[str, plc.Node] | None = None,
+        demand_nodes: dict[str, plc.Demand_node] | None = None,
+        supply_nodes: dict[str, plc.Supply_node] | None = None,
+        compressors: dict[str, plc.Compressor] | None = None,
+        regulators: dict[str, plc.Regulator] | None = None,
         eos: _EOS_OPTIONS = "rk",
         thermo_curvefit: bool = True,
         composition_tracking: bool = False,
@@ -54,8 +54,43 @@ class BlendPATH_network:
         ff_type: FF_TYPES = "hofer",
         validate_connectivity: bool = True,
     ) -> None:
-        """
-        Initialize a network
+        """Initialize a BlendPATH_network
+
+        Parameters
+        ----------
+        composition : plc.Composition
+            Composition object that handles gas phase species and thermodynamics
+        name : str, optional
+            Network name, by default ""
+        pipes : dict[str, plc.Pipe] | None, optional
+            Pipes within the network. Key values are the pipe name., by default None
+        nodes : dict[str, plc.Node] | None, optional
+            Nodes within the network. Key values are the node name, by default None
+        demand_nodes : dict[str, plc.Demand_node] | None, optional
+            Demand nodes within the network. Key values are the demand node name, by default None
+        supply_nodes : dict[str, plc.Supply_node] | None, optional
+            Supply nodes within the network. Key values are the supply node name, by default None
+        compressors : dict[str, plc.Compressor] | None, optional
+            Compressors within the network. Key values are the compressor name, by default None
+        regulators : dict[str, plc.Regulator] | None, optional
+            Regulators within the network. Key values are the regulator name, by default None
+        eos : _EOS_OPTIONS, optional
+            Equation of state, by default "rk"
+        thermo_curvefit : bool, optional
+            Enable generating curvefits for thermodynamic properties. Usually speeds up computational time, by default True
+        composition_tracking : bool, optional
+            Enables mixing at nodes, otherwise uniform gas composition is assumed throughout network, by default False
+        scenario_type : Scenario_type, optional
+            Scenario type, either transmission or distribution, by default Scenario_type.TRANSMISSION
+        ff_type : FF_TYPES, optional
+            Pipe friction factor, by default "hofer"
+        validate_connectivity : bool, optional
+            Enable connectivity checks, by default True
+
+        Raises
+        ------
+        ValueError
+            Invalid scenario type
         """
         # Assign defaults
         self.name = name
@@ -73,8 +108,7 @@ class BlendPATH_network:
         self.ff_type = ff_type
         self.pipe_segments = []
 
-        self.check_supply_demand_overlap()
-
+        # Check scenario type
         if scenario_type not in Scenario_type.options:
             raise ValueError(
                 f"scenario_type must be one of {[scen_type for scen_type in Scenario_type.options]}, got {scenario_type}"
@@ -93,25 +127,52 @@ class BlendPATH_network:
             )
 
         self.unique_demand_nodes = list(
-            set([dn.node.name for dn in self.demand_nodes.values()])
+            {dn.node.name for dn in self.demand_nodes.values()}
         )
 
     def update_pipe_designation(self) -> None:
+        """Update pipes to be steel pipe or polymer pipe. Relevant for MAOP and distribution methods. Determine type be rating code"""
         pipes_temp = {}
         for pipe in self.pipes.values():
             if type(pipe) is plc.Pipe:
-                pipes_temp[pipe.name] = plc.Steel_pipe(
-                    from_node=pipe.from_node,
-                    to_node=pipe.to_node,
-                    name=pipe.name,
-                    diameter_mm=pipe.diameter_mm,
-                    length_km=pipe.length_km,
-                    roughness_mm=pipe.roughness_mm,
-                    thickness_mm=pipe.thickness_mm,
-                    rating_code=pipe.rating_code,
-                    p_max_mpa_g=pipe.p_max_mpa_g,
-                    ff_type=pipe.ff_type,
-                )
+                m = re.match(r"([A-Za-z]+)\s*([0-9]*)", pipe.rating_code.strip())
+                if (
+                    (m)
+                    and (letters := m.group(1).upper())
+                    and (letters in _POLYMER_CODES)
+                ):
+                    pipes_temp[pipe.name] = plc.Polymer_pipe(
+                        from_node=pipe.from_node,
+                        to_node=pipe.to_node,
+                        name=pipe.name,
+                        diameter_mm=pipe.diameter_mm,
+                        length_km=pipe.length_km,
+                        roughness_mm=pipe.roughness_mm,
+                        thickness_mm=pipe.thickness_mm,
+                        rating_code=pipe.rating_code,
+                        p_max_mpa_g=pipe.p_max_mpa_g,
+                        ff_type=pipe.ff_type,
+                        polymer=letters,
+                        polymer_designation=m.group(2),
+                        velocity_limit=pipe.velocity_limit,
+                        design_factor=pipe.design_factor,
+                    )
+
+                else:
+                    pipes_temp[pipe.name] = plc.Steel_pipe(
+                        from_node=pipe.from_node,
+                        to_node=pipe.to_node,
+                        name=pipe.name,
+                        diameter_mm=pipe.diameter_mm,
+                        length_km=pipe.length_km,
+                        roughness_mm=pipe.roughness_mm,
+                        thickness_mm=pipe.thickness_mm,
+                        rating_code=pipe.rating_code,
+                        p_max_mpa_g=pipe.p_max_mpa_g,
+                        ff_type=pipe.ff_type,
+                        velocity_limit=pipe.velocity_limit,
+                        design_factor=pipe.design_factor,
+                    )
                 pipes_temp[pipe.name].m_dot = pipe.m_dot
             else:
                 pipes_temp[pipe.name] = pipe
@@ -134,26 +195,30 @@ class BlendPATH_network:
             reg.to_node.add_connection(reg)
 
     def assign_nodes(self) -> None:
-        node_index = 0
-        for node in self.nodes.values():
+        """Assign index to each node. Idenitfy ignore nodes (node with pressure assigned) and adjusted node index, which is node index skipping ignored nodes."""
+        for node_index, node in enumerate(self.nodes.values()):
             node.index = node_index
-            node_index += 1
 
-        self.ignore_nodes = []
+        ignore_nodes = set()
+
+        # Supply nodes that are pressure supply nodes are ignored since pressure is already set
         for sn in self.supply_nodes.values():
             if not sn.is_pressure_supply:
                 continue
-            self.ignore_nodes.append(sn.node.index)
-        for comp in self.compressors.values():
-            self.ignore_nodes.append(comp.to_node.index)
-        for reg in self.regulators.values():
-            self.ignore_nodes.append(reg.to_node.index)
-        self.ignore_nodes.sort()
+            ignore_nodes.add(sn.node.index)
 
+        # Compressor to nodes have pressure set
+        for comp in self.compressors.values():
+            ignore_nodes.add(comp.to_node.index)
+
+        # Sorted and unique ignore nodes
+        self.ignore_nodes = sorted(set(ignore_nodes))
+
+        # Assigned adjusted nodes
         self.nodes_clean = []
         index = 0
         for node in self.nodes.values():
-            if node.index in self.ignore_nodes:
+            if node.index in ignore_nodes:
                 self.nodes_clean.append(None)
                 node.index_adj = None
             else:
@@ -172,9 +237,39 @@ class BlendPATH_network:
         ff_type: FF_TYPES = "hofer",
         validate_connectivity: bool = True,
         blend: float | None = None,
-    ):
-        """
-        Make network from file
+    ) -> Self:
+        """Generate a network from a xlsx file
+
+        Parameters
+        ----------
+        name : str
+            File name
+        scenario_type : Scenario_type, optional
+            Scenario type, distribution or transmission, by default Scenario_type.TRANSMISSION
+        composition_tracking : bool, optional
+            Enable mixing at nodes, by default False
+        thermo_curvefit : bool, optional
+            Enable curvefits for thermodynamics, by default True
+        eos : _EOS_OPTIONS, optional
+            Equation of state, by default "rk"
+        ff_type : FF_TYPES, optional
+            Pipe friction factor, by default "hofer"
+        validate_connectivity : bool, optional
+            Enable connectivity check, by default True
+        blend : float | None, optional
+            Assign a H2 blend by default, by default None
+
+        Returns
+        -------
+        Self
+            BlendPATH network created from file
+
+        Raises
+        ------
+        ValueError
+            Invalid node
+        FileNotFoundError
+            Invalid file
         """
         filename_full_path = Path(name).absolute()
         logger.info(f"Importing file: {filename_full_path}")
@@ -185,7 +280,7 @@ class BlendPATH_network:
 
         # Read in input from excel file by sheet
         if not isfile(filename_full_path):
-            raise ValueError(
+            raise FileNotFoundError(
                 f"Could not find file with file name: {filename_full_path}"
             )
 
@@ -195,6 +290,23 @@ class BlendPATH_network:
         # If distribution network, get upper bound of pressure from supply nodes, compressors, and regulators,
         # otherwise if it is a transmission network, use the max pressure
         max_pressure = SCENARIO_VALUES[scenario_type].max_pressure_pa
+        if scenario_type == Scenario_type.DISTRIBUTION:
+            pressure_buffer = 1.5
+            max_pressure = (
+                max(
+                    max(file_raw[bp_ni.SheetName.SUPPLY]["pressure_mpa_g"]),
+                    max(
+                        file_raw[bp_ni.SheetName.COMPRESSORS]["pressure_out_mpa_g"],
+                        default=0,
+                    ),
+                    max(
+                        file_raw[bp_ni.SheetName.REGULATORS]["pressure_out_mpa_g"],
+                        default=0,
+                    ),
+                )
+                * gl.MPA2PA
+                * pressure_buffer
+            )
 
         # Load composition
         composition = plc.Composition(
@@ -236,7 +348,9 @@ class BlendPATH_network:
                 node=nodes[file_raw[bp_ni.SheetName.SUPPLY]["node_name"][i]],
                 pressure_mpa=float(
                     file_raw[bp_ni.SheetName.SUPPLY]["pressure_mpa_g"][i]
-                ),
+                )
+                if file_raw[bp_ni.SheetName.SUPPLY]["pressure_mpa_g"][i] is not None
+                else file_raw[bp_ni.SheetName.SUPPLY]["pressure_mpa_g"][i],
                 flowrate_MW=file_raw[bp_ni.SheetName.SUPPLY]["flowrate_MW"][i],
                 blend=float(file_raw[bp_ni.SheetName.SUPPLY]["blend"][i]),
             )
@@ -254,6 +368,7 @@ class BlendPATH_network:
                 min_pressure_mpa_g=float(
                     file_raw[bp_ni.SheetName.DEMAND]["min_pressure_mpa_g"][i]
                 ),
+                blend_limit=file_raw[bp_ni.SheetName.DEMAND]["blend_limit"][i],
             )
 
         # Create pipes
@@ -287,6 +402,30 @@ class BlendPATH_network:
                     ),
                     rating_code=rating_code,
                     p_max_mpa_g=max_pressure_mpa,
+                    velocity_limit=file_raw[bp_ni.SheetName.PIPES]["velocity_limit"][i],
+                    design_factor=file_raw[bp_ni.SheetName.PIPES]["design_factor"][i],
+                )
+            elif len(rating_code) > 2 and rating_code[0:1] in _POLYMER_CODES:
+                pipes[pipe_name] = plc.Polymer_pipe(
+                    name=pipe_name,
+                    from_node=nodes[from_node],
+                    to_node=nodes[to_node],
+                    diameter_mm=float(
+                        file_raw[bp_ni.SheetName.PIPES]["diameter_mm"][i]
+                    ),
+                    length_km=float(file_raw[bp_ni.SheetName.PIPES]["length_km"][i]),
+                    roughness_mm=float(
+                        file_raw[bp_ni.SheetName.PIPES]["roughness_mm"][i]
+                    ),
+                    thickness_mm=float(
+                        file_raw[bp_ni.SheetName.PIPES]["thickness_mm"][i]
+                    ),
+                    rating_code=rating_code,
+                    polymer=rating_code[0:1],
+                    polymer_designation=rating_code[2:],
+                    p_max_mpa_g=max_pressure_mpa,
+                    velocity_limit=file_raw[bp_ni.SheetName.PIPES]["velocity_limit"][i],
+                    design_factor=file_raw[bp_ni.SheetName.PIPES]["design_factor"][i],
                 )
             else:
                 pipes[pipe_name] = plc.Pipe(
@@ -305,6 +444,8 @@ class BlendPATH_network:
                     ),
                     rating_code=rating_code,
                     p_max_mpa_g=max_pressure_mpa,
+                    velocity_limit=file_raw[bp_ni.SheetName.PIPES]["velocity_limit"][i],
+                    design_factor=file_raw[bp_ni.SheetName.PIPES]["design_factor"][i],
                 )
 
         # Compressors
@@ -365,6 +506,7 @@ class BlendPATH_network:
                 pressure_out_mpa_g=float(
                     file_raw[bp_ni.SheetName.REGULATORS]["pressure_out_mpa_g"][i]
                 ),
+                blend_limit=file_raw[bp_ni.SheetName.REGULATORS]["blend_limit"][i],
             )
 
         return BlendPATH_network(
@@ -384,9 +526,35 @@ class BlendPATH_network:
             validate_connectivity=validate_connectivity,
         )
 
-    def blendH2(self, blend: float) -> None:
+    @classmethod
+    def import_from_file_timeseries(
+        cls,
+        network_file,
+        *,
+        patched_network_file=None,
+        output_folder=None,
+        **import_kwargs,
+    ):
         """
-        Blend amount of H2. Reassigns composition and recalculated flow rates
+        Prepare a time-series-safe workbook, then import the network normally.
+        """
+        from BlendPATH.network.network_timeseries import import_from_file_timeseries
+
+        return import_from_file_timeseries(
+            network_cls=cls,
+            network_file=network_file,
+            patched_network_file=patched_network_file,
+            output_folder=output_folder,
+            **import_kwargs,
+        )
+
+    def blendH2(self, blend: float) -> None:
+        """Blend amount of H2. Reassigns composition and recalculated flow rates
+
+        Parameters
+        ----------
+        blend : float
+            Blend fraction by volume of hydrogen
         """
         blend = float(blend)
         self.composition.blendH2(blend)
@@ -394,6 +562,7 @@ class BlendPATH_network:
         for n in self.nodes.values():
             n.x_h2 = blend
 
+        # Overwrites blends if already specified at supply nodes
         for sn in self.supply_nodes.values():
             sn.blend = blend
             sn.blendH2()
@@ -407,20 +576,43 @@ class BlendPATH_network:
         c_relax: float | None = None,
         cr_max: float = 1.5,
         low_p_buffer: float = 0.00,
-        initializer: Union[int, dict] = 0,
+        initializer: int | dict[str, float] = 0,
         tol_abs: float = gl.SOLVER_TOL_ABS,
         tol_rel: float = gl.SOLVER_TOL_REL,
+        regulator_tol_pa: float = 100,
+        regulator_recover_tol_pa: float | None = None,
+        max_regulator_mode_switches: int = 5,
     ) -> None:
-        """
-        Solve network pressures
-        """
-        # Check if we need linear interpolation on composition
-        if self.thermo_curvefit and not hasattr(self.composition, "curve_fit_rho"):
-            self.composition.make_interps(
-                self.min_pressure_bound, self.max_pressure_bound
-            )
+        """Solve network hydraulics
 
-        self.check_supply_demand_overlap()
+        Parameters
+        ----------
+        c_relax : float | None, optional
+            Relaxation factor, by default None
+        cr_max : float, optional
+            Maximuim compression ratio for initialization, by default 1.5
+        low_p_buffer : float, optional
+            Buffer for minimum pressure in case many values are near to the low limit, by default 0.00
+        initializer : int | dict[str, float], optional
+            Initialization routine, by default 0
+        tol_abs : float, optional
+            Absolute tolerance, by default gl.SOLVER_TOL_ABS
+        tol_rel : float, optional
+            Relative tolerance, by default gl.SOLVER_TOL_REL
+        regulator_tol_pa : float, optional
+            Regulator tolerance, by default 100
+        regulator_recover_tol_pa : float | None, optional
+            Regulator recover tolerance, by default None
+        max_regulator_mode_switches : int, optional
+            Maximum number of times a regulator can switch modes, by default 5
+        """
+        self.presolve_checks()
+        tols = network_util.Tols(
+            tol_abs=tol_abs,
+            tol_rel=tol_rel,
+            regulator_tol_pa=regulator_tol_pa,
+            regulator_recover_tol_pa=regulator_recover_tol_pa,
+        )
 
         # If not specificed, assign relaxation constant based on scenario type
         if c_relax is None:
@@ -428,270 +620,261 @@ class BlendPATH_network:
 
         # Stack up demands
         dn_node_vals = network_util.get_stacked_demand_mdot(network=self)
-
+        # Get supply nodes that are flow rates
+        sn_flow_nodes = [
+            sn.node for sn in self.supply_nodes.values() if not sn.is_pressure_supply
+        ]
         n_adj = self.n_nodes - len(self.ignore_nodes)
 
-        # Initialize pressure and set the state of each node
-        p_init = network_util.initialize_handler(
-            initializer=initializer, network=self, cr_max=cr_max
-        )
-
-        for node in self.nodes.values():
-            if node.index in self.ignore_nodes:
-                continue
-            node.pressure = p_init[node.index_adj]
-
-        # Get initial mass flow rate targets
-        m_dot_target, dn_nodes, dn_node_adj = network_util.get_flow_targets(
-            n_adj=n_adj, network=self
-        )
-
-        # Get static properties (e.g., diameter, length)
-        pipe_static_props = np.array(
-            [pipe.get_pipe_static_properties() for pipe in self.pipes.values()]
-        )
-
-        # Make a mask to collect only not ignore nodes
-        mask = np.ones(self.n_nodes, dtype=bool)
-        mask[self.ignore_nodes] = False
-
-        # Pre-determine connections
-        cxns = network_util.make_connections(
-            self, shape_pn=(self.n_nodes, len(self.pipes))
-        )
-        jacobian = scipy.sparse.csr_matrix(
-            ([0.0] * len(cxns[0]), (cxns[0], cxns[1])), shape=(n_adj, n_adj)
-        )
-        # Get all the indices from CSR format
-        j_inds = [
-            (i, j)
-            for i in range(n_adj)
-            for j in jacobian.indices[jacobian.indptr[i] : jacobian.indptr[i + 1]]
-        ]
-
-        m_dot_prev = [np.nan for _ in self.pipes]
-
-        # Loop
-        p_solving = p_init.copy()
-        n_iter = 0
-        err_abs, err_rel = np.inf, np.inf
-        while err_abs > tol_abs or err_rel > tol_rel:
-            # Make jacobian and nodal flow based connectivity and flow
-            nodal_flow, x_out, m_dot_prev = self.make_jacobian(
-                pipe_static_props=pipe_static_props,
-                p_solving=p_solving,
-                cxns=cxns,
-                j_inds=j_inds,
-                jacobian_data=jacobian.data,
-                m_dot_prev=m_dot_prev,
+        # Loop through mode switches
+        current_initializer = initializer
+        if not self.regulators:
+            max_regulator_mode_switches = 0
+        for mode_switches in range(max_regulator_mode_switches + 1):
+            # Initialize pressure and set the state of each node
+            p_init = network_util.initialization(
+                initializer=current_initializer, network=self, cr_max=cr_max
             )
-            # Get difference in flow rate from target
-            delta_flow = m_dot_target - nodal_flow[mask]
 
-            if n_iter % 10 == 0:
-                j_max = int(np.argmax(np.abs(delta_flow)))
-                node_name_dbg = [
-                    n for n in self.nodes.values() if n.index_adj == j_max
-                ][0].name
-                logger.debug(
-                    f"[it{n_iter:03}] max|Δṁ| = {delta_flow[j_max]:.4f} kg/s @ {node_name_dbg}"
+            m_dot_target, dn_nodes, dn_node_adj = network_util.get_flow_targets(
+                n_adj=n_adj, network=self
+            )
+            m_dot_original = m_dot_target.copy()
+
+            # Make a mask to collect only not ignore nodes
+            mask = np.ones(self.n_nodes, dtype=bool)
+            mask[self.ignore_nodes] = False
+
+            pipe_jacobian_info = network_util.pipe_jacobian_setup(network=self)
+            reg_jacobian_info = network_util.reg_jacobian_setup(network=self)
+
+            # Intermediate array of pressures and regulator flows
+            p_solving = p_init.copy()
+            reg_flow_solving = np.array(
+                [reg.flow_mdot for reg in reg_jacobian_info.regulators], dtype=float
+            )
+
+            n_iter = 0
+            m_dot_prev = np.full(len(self.pipes), np.nan)
+
+            while True:
+                # Make jacobian and nodal flow based connectivity and flow
+                nodal_flow_pipe, x_out, m_dot_prev = self.make_jacobian(
+                    p_solving=p_solving,
+                    pipe_jacobian_info=pipe_jacobian_info,
+                    m_dot_prev=m_dot_prev,
                 )
 
-            # Solve for the change in pressure
-            # delta_p = np.linalg.solve(a=jacobian, b=delta_flow)
-            delta_p = scipy.sparse.linalg.spsolve(A=jacobian, b=delta_flow)
-
-            # Apply relaxation factor
-            p_solving += delta_p / c_relax
-
-            # Check if any values are NAN
-            if np.any(np.isnan(p_solving)):
-                raise ValueError("NAN pressure")
-            # Check if negative pressure. Apply correction to see if it resolves
-            if np.any(p_solving < 0):
-                ind = np.where(p_solving < 0)
-                p_solving[ind] -= (delta_p[ind] / c_relax) * 0.99
-                if np.any(p_solving < 0):
-                    raise ValueError("Negative pressure")
-
-            # Assign pressures at each node. Skip the ignored nodes
-            for node in self.nodes.values():
-                if node.index in self.ignore_nodes:
-                    continue
-                node.pressure = p_solving[node.index_adj]
-
-            n_iter += 1
-
-            if self.composition_tracking:
-                x_out = np.clip(x_out, 0, 1)
-                # Reassign compositions
-                for pipe in self.pipes.values():
-                    # Flow is from_node->to_node
-                    if pipe.direction == 1:
-                        pipe.x_h2 = x_out[pipe.from_node.index]
-                    else:
-                        pipe.x_h2 = x_out[pipe.to_node.index]
-                for node in self.nodes.values():
-                    node.x_h2 = x_out[node.index]
-
-                # Update demand nodes mass flow rate based on blend
-                m_dot_target = np.zeros(n_adj)
-                for dn in self.demand_nodes.values():
-                    if dn.node.index in self.ignore_nodes:
-                        continue
-                    hhv = self.composition.get_hhv(x_out[dn.node.index])
-                    m_dot_target[dn.node.index_adj] += dn.recalc_mdot(hhv)
-                for sn in self.supply_nodes.values():
-                    if not sn.is_pressure_supply:
-                        if sn.node.index in self.ignore_nodes:
-                            continue
-                        # hhv = self.composition.get_curvefit_hhv(x_out[sn.node.index])
-                        m_dot_target[sn.node.index_adj] -= sn.flowrate_mdot
-
-                dn_node_vals = network_util.get_stacked_demand_mdot(network=self)
-
-            if self.compressors:
-                # Evaluate compressor thermo as vector
-                comp_p = network_util.get_compressor_p_and_x(network=self, x_out=x_out)
-                comp_h_1, comp_s_1, comp_h_2_s = self.get_h_s_s(
-                    x=comp_p[:, 0], p1=comp_p[:, 1], p2=comp_p[:, 2]
-                )
-
-                for c_i, comp in enumerate(self.compressors.values()):
-                    if comp.from_node.is_supply:
-                        fuel_use = comp.get_fuel_use(
-                            comp_h_1[c_i],
-                            comp_s_1[c_i],
-                            comp_h_2_s[c_i],
-                            -1 * nodal_flow[comp.to_node.index],
-                        )
-                        continue
-                    from_c = comp.from_node.index_adj
-                    comp_flow = -1 * nodal_flow[comp.to_node.index]
-                    if not comp.to_node.connections["Pipe"]:
-                        # If there is a compressor at the end of the segment
-                        comp_flow = dn_node_vals[comp.to_node.name]
-                        nodal_flow[comp.to_node.index] = comp_flow
-                    elif comp.to_node.is_demand:
-                        comp_flow += dn_node_vals[comp.to_node.name]
-                        nodal_flow[comp.to_node.index] += comp_flow
-                    m_dot_target[from_c] = comp_flow
-                    # If using fuel extraction, then reduce mdot after comp
-                    fuel_use = comp.get_fuel_use(
-                        comp_h_1[c_i], comp_s_1[c_i], comp_h_2_s[c_i], comp_flow
+                nodal_flow_reg, regulator_jacobian = (
+                    network_util.make_regulator_jacobian(
+                        reg_flow_solving=reg_flow_solving,
+                        n_adj=n_adj,
+                        reg_jacobian_info=reg_jacobian_info,
                     )
-                    if not comp.fuel_extract:
-                        continue
-                    m_dot_target[from_c] += fuel_use
-                    # m_dot_target[supply_node.node.index] -= fuel_use
-
-            for reg in self.regulators.values():
-                from_r = reg.from_node.index_adj
-                reg_flow = -1 * nodal_flow[reg.to_node.index]
-                if not reg.to_node.connections["Pipe"]:
-                    # If there is a regulator at the end of the segment
-                    reg_flow = dn_node_vals[reg.to_node.name]
-                    nodal_flow[reg.to_node.index] = reg_flow
-                # m_dot_target[from_r] = (
-                #     m_dot_target[from_r]
-                #     + (reg_flow - m_dot_target[from_r]) / c_relax / 5
-                # )
-                m_dot_target[from_r] = reg_flow
-                reg.apply_regulation()
-
-            if n_iter > gl.MAX_ITER:
-                raise ValueError(f"Could not converge in {gl.MAX_ITER} iterations")
-
-            err_abs = np.max(np.absolute(delta_flow))
-            err_rel = np.max(
-                np.absolute(
-                    (m_dot_target[dn_node_adj] - nodal_flow[dn_nodes])
-                    / m_dot_target[dn_node_adj]
                 )
-            )
+
+                # Get difference in flow rate from target
+                nodal_flow_total = nodal_flow_pipe + nodal_flow_reg
+                delta_flow = m_dot_target - nodal_flow_total[mask]
+
+                # Solve equations for change to pressure and mass flow
+                delta_p, delta_reg_flow = network_util.solve_linalg(
+                    pipe_jacobian=pipe_jacobian_info.jacobian,
+                    regulator_jacobian=regulator_jacobian,
+                    n_adj=n_adj,
+                    delta_flow=delta_flow,
+                )
+
+                # Update pressures and apply relaxation factor
+                p_solving += delta_p / c_relax
+                reg_flow_solving += delta_reg_flow / c_relax
+
+                # Check values
+                network_util.check_negative_pressure(
+                    p_solving=p_solving, delta_p=delta_p, c_relax=c_relax
+                )
+                network_util.check_reg_flows(
+                    reg_flow_solving=reg_flow_solving,
+                )
+
+                # Assign pressures at each node. Skip the ignored nodes
+                for node in self.nodes.values():
+                    if node.index in self.ignore_nodes:
+                        continue
+                    node.pressure = p_solving[node.index_adj]
+
+                for reg_i, reg in enumerate(reg_jacobian_info.regulators):
+                    reg.flow_mdot = reg_flow_solving[reg_i]
+
+                n_iter += 1
+
+                # Mixing if composition tracking is enabled
+                if self.composition_tracking:
+                    x_out = np.clip(x_out, 0, 1)
+                    # Reassign compositions
+                    for pipe in self.pipes.values():
+                        # Flow is from_node->to_node
+                        if pipe.direction == 1:
+                            pipe.x_h2 = x_out[pipe.from_node.index]
+                        else:
+                            pipe.x_h2 = x_out[pipe.to_node.index]
+                    for node in self.nodes.values():
+                        node.x_h2 = x_out[node.index]
+
+                    # Update demand nodes mass flow rate based on blend
+                    m_dot_target = np.zeros(n_adj)
+                    for dn in self.demand_nodes.values():
+                        if dn.node.index in self.ignore_nodes:
+                            continue
+                        hhv = self.composition.get_hhv(x_out[dn.node.index])
+                        m_dot_target[dn.node.index_adj] += dn.recalc_mdot(hhv)
+                    for sn in self.supply_nodes.values():
+                        if not sn.is_pressure_supply:
+                            if sn.node.index in self.ignore_nodes:
+                                continue
+                            m_dot_target[sn.node.index_adj] -= sn.flowrate_mdot
+
+                    dn_node_vals = network_util.get_stacked_demand_mdot(network=self)
+
+                # Calculate compressor work and flow adjustments
+                if self.compressors:
+                    # Evaluate compressor thermo as vector
+                    comp_p = network_util.get_compressor_p_and_x(
+                        network=self, x_out=x_out
+                    )
+                    comp_h_1, comp_s_1, comp_h_2_s = self.get_h_s_s(
+                        x=comp_p[:, 0], p1=comp_p[:, 1], p2=comp_p[:, 2]
+                    )
+
+                    for c_i, comp in enumerate(self.compressors.values()):
+                        if (
+                            comp.from_node.is_supply
+                            and comp.from_node not in sn_flow_nodes
+                        ):
+                            fuel_use = comp.get_fuel_use(
+                                comp_h_1[c_i],
+                                comp_s_1[c_i],
+                                comp_h_2_s[c_i],
+                                -1 * nodal_flow_pipe[comp.to_node.index],
+                            )
+                            continue
+                        from_c = comp.from_node.index_adj
+                        comp_flow = -1 * nodal_flow_pipe[comp.to_node.index]
+                        if not comp.to_node.connections["Pipe"]:
+                            # If there is a compressor at the end of the segment
+                            comp_flow = dn_node_vals[comp.to_node.name]
+                            nodal_flow_pipe[comp.to_node.index] = comp_flow
+                        elif comp.to_node.is_demand:
+                            comp_flow += dn_node_vals[comp.to_node.name]
+                            nodal_flow_pipe[comp.to_node.index] += comp_flow
+                        m_dot_target[from_c] = max(
+                            m_dot_original[from_c] + comp_flow, 0
+                        )
+                        # If using fuel extraction, then reduce mdot after comp
+                        fuel_use = comp.get_fuel_use(
+                            comp_h_1[c_i], comp_s_1[c_i], comp_h_2_s[c_i], comp_flow
+                        )
+                        if not comp.fuel_extract:
+                            continue
+                        m_dot_target[from_c] += fuel_use
+
+                # Calculate error
+                err_abs, err_rel = network_util.err_calculation(
+                    demand_target=m_dot_target[dn_node_adj],
+                    demand_actual=nodal_flow_total[dn_nodes],
+                    delta_flow=delta_flow,
+                )
+
+                # Exit criteria
+                if network_util.exit_solving_loop(
+                    n_iter=n_iter,
+                    limits=(
+                        err_abs <= tols.tol_abs,
+                        err_rel <= tols.tol_rel,
+                        regulator_jacobian.err_abs_flow <= tols.tol_abs,
+                        regulator_jacobian.err_abs_pa <= tols.regulator_tol_pa,
+                    ),
+                ):
+                    break
+
+            # Update regulators
+            if network_util.regulator_mode_updates(
+                regulators=self.regulators, tols=tols
+            ):
+                current_initializer = {
+                    node.name: (node.pressure, node.x_h2)
+                    for node in self.nodes.values()
+                }
+            else:
+                break
 
         # Update pipe mass balances
         for p_i, pipe in enumerate(self.pipes.values()):
             pipe.m_dot = m_dot_prev[p_i]
 
-        # Check H2 mass balance
-        network_util.check_h2_balance(network=self)
+        # Post solve checks
+        network_util.convergence_checks(
+            network=self, tols=tols, p_solving=p_solving, low_p_buffer=low_p_buffer
+        )
 
-        # Check for any values below minimum pressure
-        if np.any(
-            self.min_pressure_bound - p_solving
-            >= self.min_pressure_bound * low_p_buffer
-        ):
-            raise ValueError("Pressure below threshold")
-
-        # Check minimum pressure at demands
-        for dn in self.demand_nodes.values():
-            actual_pa = dn.node.pressure
-            required_pa = dn.min_pressure_mpa_g * gl.MPA2PA
-
-            if actual_pa < required_pa:
-                raise ValueError(
-                    f"Demand node '{dn.name}' at node '{dn.node.name}' "
-                    f"has pressure {actual_pa / gl.BAR2PA:.2f} bar, "
-                    f"below required minimum of {dn.min_pressure_mpa_g} MPa-g"
-                )
-
-        # Assign demand flow rates
-        # Some demands stack at a single node, so use same ratio of setpoints
-        # to distribute calculated demand flow rate
-        stacking_demand = {}
-        for dnode in self.demand_nodes.values():
-            if dnode.node.index not in stacking_demand.keys():
-                stacking_demand[dnode.node.index] = {dnode.name: dnode.flowrate_mdot}
-            else:
-                stacking_demand[dnode.node.index][dnode.name] = dnode.flowrate_mdot
-        for dnode in self.demand_nodes.values():
-            dnode.flowrate_mdot_sim = (
-                nodal_flow[dnode.node.index]
-                * stacking_demand[dnode.node.index][dnode.name]
-                / sum(stacking_demand[dnode.node.index].values())
-            )
+        # Update demand node flows (primarily for the case of stacked demand nodes)
+        network_util.update_demand_node_mdots(
+            network=self, nodal_flow_pipe=nodal_flow_pipe
+        )
 
     def make_jacobian(
         self,
-        pipe_static_props: npt.NDArray[np.float64],
         p_solving: npt.NDArray[np.float64],
-        cxns: tuple,
-        j_inds: list[str],
-        jacobian_data: npt.NDArray[np.float64],
+        pipe_jacobian_info: network_util.Pipe_jacobian_info,
         m_dot_prev: npt.NDArray[np.float64],
-    ) -> tuple:
-        """
-        Make jacobian matrix for solver
+    ) -> tuple[
+        npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
+    ]:
+        """Generate jacobian for pipe flow equations
+
+        Parameters
+        ----------
+        p_solving : npt.NDArray[np.float64]
+            Current iteration pressures in Pa-g
+        pipe_jacobian_info : network_util.Pipe_jacobian_info
+            Pipe jacobian properties holding connection matrix, pipe iteration-static properties, and the csr matrix
+        m_dot_prev : npt.NDArray[np.float64]
+            Previous iteration pipe mass flow rates [kg/s]
+
+        Returns
+        -------
+        tuple[ npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64] ]
+            nodal_flow, x_out, m_dot_pipe_v
         """
         len_all_nodes = len(self.nodes)
         len_p_supply_nodes = 0
         len_comps = 0
 
-        # Only need to solve to unknown pressures
-        # P supplies are known and pressure outlet of compressors is known
         n_nodes = len_all_nodes - len_p_supply_nodes - len_comps
-        # n_adj = n_nodes - len(self.ignore_nodes)
 
         if self.composition_tracking:
             n_nodal = np.zeros(n_nodes, dtype=float)
             x_nodal = np.zeros(n_nodes, dtype=float)
 
+        # Retrieve pipe values the change per iteration (i.e., pressures, direction)
         pipe_dynamic_props = np.array(
             [pipe.get_pipe_dynamic_properties() for pipe in self.pipes.values()]
         )
+        # calculate average pipe pressure
         p_avg = Pipe.p_avg_vector(
             pipe_dynamic_props[:, Pipe.DYN_PROPS.P_FROM],
             pipe_dynamic_props[:, Pipe.DYN_PROPS.P_TO],
         )
 
+        # Get Z, mu, molecular weight from equation of state
         _, z_avgs, mu, mw = self.get_rho_z_mu(
             pipe_avgs_gauge=p_avg, x_vals=pipe_dynamic_props[:, Pipe.DYN_PROPS.X_H2]
         )
 
+        # calculate dm/dp and mdot vector
         dm_dp, m_dot_pipe_v = Pipe.get_jacobian_components(
             dyn_props=pipe_dynamic_props,
-            static_props=pipe_static_props,
+            static_props=pipe_jacobian_info.pipe_static_props,
             z_avgs=z_avgs,
             mw=mw,
             mu=mu,
@@ -699,24 +882,22 @@ class BlendPATH_network:
             m_dot_prev=m_dot_prev,
         )
 
-        # Generate jacobian
-        rows, cols, p_index, coefs, pipe_node_cxns = cxns
-        data = coefs * dm_dp[p_index] * p_solving[cols]
-        # Triplet → CSR
-        # jacobian = scipy.sparse.csr_matrix((data, (rows, cols)), shape=(n_adj, n_adj))
-
+        # Assign jacobian values
+        data = (
+            pipe_jacobian_info.cxns.direction
+            * dm_dp[pipe_jacobian_info.cxns.pipe_index]
+            * p_solving[pipe_jacobian_info.cxns.cols]
+        )
+        # Accomdate overlapping matrix entries
         jd = defaultdict(float)
-        # Add up duplicates and index by row_col
-        for r_i, r in enumerate(rows):
-            jd[(r, cols[r_i])] += data[r_i]
+        for r_i, r in enumerate(pipe_jacobian_info.cxns.rows):
+            jd[(r, pipe_jacobian_info.cxns.cols[r_i])] += data[r_i]
 
-        # Swap in place jacobian data
-        for i, val in enumerate(j_inds):
-            jacobian_data[i] = jd[val]
+        for i, val in enumerate(pipe_jacobian_info.indices):
+            pipe_jacobian_info.jacobian.data[i] = jd[val]
 
-        # Loop thru pipes
-        # Assign nodal flows based on connections
-        nodal_flow = pipe_node_cxns @ m_dot_pipe_v
+        # calculate nodal flows
+        nodal_flow = pipe_jacobian_info.cxns.cxn_matrix @ m_dot_pipe_v
 
         if self.composition_tracking:
             for p_i, pipe in enumerate(self.pipes.values()):
@@ -735,7 +916,6 @@ class BlendPATH_network:
         if not self.composition_tracking:
             x_out = np.array([node.x_h2 for node in self.nodes.values()])
         else:
-            # Get x_h2 out of nodes
             with np.errstate(invalid="ignore"):
                 x_out = np.divide(x_nodal, n_nodal)
             for sn in self.supply_nodes.values():
@@ -748,13 +928,12 @@ class BlendPATH_network:
                 x_existing = x_nodal[sn.node.index]
                 if np.isnan(x_existing):
                     x_existing = 0
-                x_out[sn.node.index] = (x_existing + sn.blend * n_sn) / (
-                    n_nodal[sn.node.index] + n_sn
+                denom = n_nodal[sn.node.index] + n_sn
+                x_out[sn.node.index] = (
+                    (x_existing + sn.blend * n_sn) / denom if denom != 0 else sn.blend
                 )
             for comp in self.compressors.values():
                 x_out[comp.to_node.index] = x_out[comp.from_node.index]
-            # If there is not a flow into a node, it will register as nan. then overwrite
-            # with the existing node value
             nans = np.where(np.isnan(x_out))
             x_h2_nodes = np.array([node.x_h2 for node in self.nodes.values()])
             x_out[nans] = x_h2_nodes[nans]
@@ -869,7 +1048,7 @@ class BlendPATH_network:
         """
         Segment pipeline network into segments based on compressors, branches, diameter change
         """
-        p_supply_node_name = list(self.supply_nodes.values())[0].node.name
+        p_supply_node_name = next(iter(self.supply_nodes.values())).node.name
         pipe_segments = []
         start_nodes = [p_supply_node_name]
 
@@ -881,6 +1060,7 @@ class BlendPATH_network:
             diameter = None
             DN = None
             comps = []
+            regs = []
             p_max_mpa_g = None
             design_pressure_MPa = None
             nodes = []
@@ -941,6 +1121,22 @@ class BlendPATH_network:
                         # Add compressor at end of segment
                         comps.append(comp_conn)
 
+                # If compressor, add to start nodes
+                for reg_conn in current_node.connections["Reg"]:
+                    neighbor = (
+                        reg_conn.to_node
+                        if reg_conn.from_node == current_node
+                        else reg_conn.from_node
+                    )
+                    if (
+                        neighbor.name not in start_nodes
+                        and visited[neighbor.name] is None
+                    ):
+                        start_nodes.append(neighbor.name)
+
+                        # Add compressor at end of segment
+                        regs.append(reg_conn)
+
             if offtake_lengths[0] == 0:
                 offtake_lengths.pop(0)
             pipe_segments.append(
@@ -976,37 +1172,113 @@ class BlendPATH_network:
 
     def check_segmentation(self) -> None:
         """
-        Unused function to check if a pipe needs further segmentation based on L/D ratio
+        Check if a pipe needs further segmentation based on L/D ratio.
+        If new intermediate nodes are created, also assign plot_xy by
+        linear interpolation between the original endpoint node coordinates.
         """
+
+        def _interp_xy(xy1, xy2, frac):
+            if [x for x in xy1 if x is None]:
+                return (None, None)
+            if [x for x in xy2 if x is None]:
+                return (None, None)
+            return (
+                xy1[0] + frac * (xy2[0] - xy1[0]),
+                xy1[1] + frac * (xy2[1] - xy1[1]),
+            )
+
         seg_max = gl.SEG_MAX
         node_index = len(self.nodes.keys()) - 1
         all_pipe_names = list(self.pipes.keys())
+
         for pipe_name in all_pipe_names:
             pipe = self.pipes[pipe_name]
-            if (pipe.length_km * gl.KM2M) / (pipe.diameter_mm * gl.MM2M) > seg_max:
-                lenth_sub_segment = seg_max * (pipe.diameter_mm * gl.MM2M) / gl.KM2M
-                n_nodes = int(np.floor(pipe.length_km / lenth_sub_segment))
-                lenth_sub_segment = pipe.length_km / (n_nodes + 1)
-                from_node = pipe.from_node
-                from_node_name_fixed = from_node.name
+
+            ld_ratio = (pipe.length_km * gl.KM2M) / (pipe.diameter_mm * gl.MM2M)
+            if ld_ratio <= seg_max:
+                continue
+
+            # We now require endpoint coordinates if we are going to create new nodes
+            from_xy = getattr(pipe.from_node, "plot_xy", None)
+            to_xy = getattr(pipe.to_node, "plot_xy", None)
+
+            # if (
+            #     from_xy is None
+            #     or to_xy is None
+            #     or len(from_xy) != 2
+            #     or len(to_xy) != 2
+            #     or from_xy[0] is None
+            #     or from_xy[1] is None
+            #     or to_xy[0] is None
+            #     or to_xy[1] is None
+            # ):
+            #     raise ValueError(
+            #         f"Pipe '{pipe.name}' requires segmentation, but one or both endpoint "
+            #         f"nodes are missing plot_xy coordinates."
+            #     )
+
+            # Keep original endpoints/length for interpolation
+            orig_from_xy = pipe.from_node.plot_xy
+            orig_to_xy = pipe.to_node.plot_xy
+            orig_length_km = pipe.length_km
+
+            # Original logic for computing number of inserted nodes
+            lenth_sub_segment = seg_max * (pipe.diameter_mm * gl.MM2M) / gl.KM2M
+            n_nodes = int(np.floor(pipe.length_km / lenth_sub_segment))
+            lenth_sub_segment = pipe.length_km / (n_nodes + 1)
+
+            from_node = pipe.from_node
+            from_node_name_fixed = from_node.name
+
+            if pipe in from_node.connections["Pipe"]:
                 from_node.connections["Pipe"].remove(pipe)
-                for subseg in range(n_nodes):
-                    new_node_name = f"{from_node_name_fixed}_{subseg}"
-                    # Keep addng underscript till it is a unique name
-                    while new_node_name in self.nodes:
-                        new_node_name = f"{new_node_name}_"
-                    self.nodes[new_node_name] = plc.Node(
-                        name=new_node_name,
-                        p_max_mpa_g=from_node.p_max_mpa_g,
-                        index=node_index + 1,
-                        composition=from_node.composition,
-                        _report_out=False,
+
+            for subseg in range(n_nodes):
+                new_node_name = f"{from_node_name_fixed}_{subseg}"
+
+                # Keep adding underscore till it is a unique name
+                while new_node_name in self.nodes:
+                    new_node_name = f"{new_node_name}_"
+
+                # Fraction along the ORIGINAL pipe where this new node sits
+                frac = ((subseg + 1) * lenth_sub_segment) / orig_length_km
+                frac = min(max(frac, 0.0), 1.0)
+
+                new_xy = _interp_xy(orig_from_xy, orig_to_xy, frac)
+
+                self.nodes[new_node_name] = plc.Node(
+                    name=new_node_name,
+                    p_max_mpa_g=pipe.p_max_mpa_g,
+                    index=node_index + 1,
+                    composition=from_node.composition,
+                    plot_xy=new_xy,
+                    _report_out=False,
+                )
+                node_index += 1
+
+                new_pipe_name = f"{pipe.name}_{subseg}"
+                while new_pipe_name in self.pipes:
+                    new_pipe_name = f"{new_pipe_name}_"
+
+                to_node = self.nodes[new_node_name]
+
+                # preserve original pipe type + ff_type
+                if isinstance(pipe, plc.Polymer_pipe):
+                    self.pipes[new_pipe_name] = plc.Polymer_pipe(
+                        name=new_pipe_name,
+                        from_node=from_node,
+                        to_node=to_node,
+                        diameter_mm=pipe.diameter_mm,
+                        length_km=lenth_sub_segment,
+                        roughness_mm=pipe.roughness_mm,
+                        thickness_mm=pipe.thickness_mm,
+                        rating_code=pipe.rating_code,
+                        p_max_mpa_g=pipe.p_max_mpa_g,
+                        ff_type=pipe.ff_type,
+                        polymer=pipe.polymer,
+                        polymer_designation=pipe.polymer_designation,
                     )
-                    node_index += 1
-                    new_pipe_name = f"{pipe.name}_{subseg}"
-                    while new_pipe_name in self.pipes:
-                        new_pipe_name = f"{new_pipe_name}_"
-                    to_node = self.nodes[new_node_name]
+                else:
                     self.pipes[new_pipe_name] = plc.Steel_pipe(
                         name=new_pipe_name,
                         from_node=from_node,
@@ -1017,14 +1289,17 @@ class BlendPATH_network:
                         thickness_mm=pipe.thickness_mm,
                         rating_code=pipe.rating_code,
                         p_max_mpa_g=pipe.p_max_mpa_g,
+                        ff_type=pipe.ff_type,
                     )
-                    self.pipes[new_pipe_name]._parent_pipe = pipe.name
 
-                    from_node = to_node
+                self.pipes[new_pipe_name]._parent_pipe = pipe.name
+                from_node = to_node
 
-                length_remaining = lenth_sub_segment
-                pipe.from_node = from_node
-                pipe.length_km = length_remaining
+            # Remaining original pipe becomes the last subsegment
+            length_remaining = lenth_sub_segment
+            pipe.from_node = from_node
+            pipe.length_km = length_remaining
+
         self.set_thermo_curvefit(self.thermo_curvefit)
         self.eos = self.eos
         self.assign_nodes()
@@ -1045,9 +1320,73 @@ class BlendPATH_network:
         bp_network_file.write_comps_sheet(workbook=workbook, network=self)
         bp_network_file.write_composition_sheet(workbook=workbook, network=self)
         bp_network_file.write_regs_sheet(workbook=workbook, network=self)
+        bp_network_file.write_demands_sheet(workbook=workbook, network=self)
+        bp_network_file.write_supply_sheet(workbook=workbook, network=self)
 
         ### Closeout
         bp_file_w.file_closeout(workbook=workbook)
+
+    def to_gis(
+        self,
+        filename: str,
+        *,
+        crs: str | None = None,
+        driver: Literal["GPKG", "GeoJSON"] = "GPKG",
+    ) -> None:
+        import BlendPATH.file_writing.network_gis_out_util as bp_network_gis
+
+        bp_network_gis.write_network_gis(
+            network=self,
+            filename=filename,
+            crs=crs,
+            driver=driver,
+        )
+
+    def to_shp(
+        self,
+        foldername: str,
+        *,
+        crs: str | None = None,
+    ) -> None:
+        import BlendPATH.file_writing.network_gis_out_util as bp_network_gis
+
+        bp_network_gis.write_network_shp(
+            network=self,
+            foldername=foldername,
+            crs=crs,
+        )
+
+    def solve_timeseries(
+        self,
+        demand_profile_file,
+        output_file,
+        *,
+        demand_map=None,
+        c_relax: float = 50,
+        max_steps: int | None = None,
+        profile_sheet_name: str = "DEMAND",
+        write_gpkg_each_timestep: bool = False,
+        write_shp_each_timestep: bool = False,
+        **kwargs,
+    ):
+        """
+        Solve the existing network over a demand time series.
+
+        """
+        from BlendPATH.network.network_timeseries import solve_timeseries
+
+        return solve_timeseries(
+            network=self,
+            demand_profile_file=demand_profile_file,
+            output_file=output_file,
+            demand_map=demand_map,
+            c_relax=c_relax,
+            max_steps=max_steps,
+            profile_sheet_name=profile_sheet_name,
+            write_gpkg_each_timestep=write_gpkg_each_timestep,
+            write_shp_each_timestep=write_shp_each_timestep,
+            **kwargs,
+        )
 
     def set_thermo_curvefit(self, thermo_curvefit: bool) -> None:
         """
@@ -1117,16 +1456,6 @@ class BlendPATH_network:
                     hs[i] = (hs1_temp + hs2_temp) / 2
 
         return h, s, hs
-
-    def check_supply_demand_overlap(self):
-        """
-        Check if a suply node is also a demand node
-        if so, raise error
-        """
-        supplys = {sn.node.name for sn in self.supply_nodes.values()}
-        demands = {dn.node.name for dn in self.demand_nodes.values()}
-        if supplys & demands:
-            raise NameError("A supply node is also a demand node")
 
     def get_n_adj(self, index) -> int:
         return self.nodes_clean[index]
@@ -1305,5 +1634,37 @@ class BlendPATH_network:
         show_plot=True,
         title="",
         pipe_selections=None,
+        cmap_name: str = "viridis",
+        show_compressors: bool = True,
+        show_regulators: bool = True,
     ):
-        raise RuntimeError("Network plotting is not available in version 2.1")
+        BlendPATH.network.network_plotting.plot(
+            network=self,
+            fig=fig,
+            ax=ax,
+            pipe_property=pipe_property,
+            property_range=property_range,
+            show_demands=show_demands,
+            savename=savename,
+            cbar_range=cbar_range,
+            pipe_limit_red=pipe_limit_red,
+            title=title,
+            show_plot=show_plot,
+            pipe_selections=pipe_selections,
+            cmap_name=cmap_name,
+            show_compressors=show_compressors,
+            show_regulators=show_regulators,
+        )
+
+    def presolve_checks(self):
+        # Check if we need linear interpolation on composition
+        if self.thermo_curvefit and not hasattr(self.composition, "curve_fit_rho"):
+            self.composition.make_interps(
+                self.min_pressure_bound, self.max_pressure_bound
+            )
+
+        # Check overlapping nodes
+        supplys = {sn.node.name for sn in self.supply_nodes.values()}
+        demands = {dn.node.name for dn in self.demand_nodes.values()}
+        if supplys & demands:
+            raise NameError("A supply node is also a demand node")

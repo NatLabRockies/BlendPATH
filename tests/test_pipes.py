@@ -50,6 +50,58 @@ def test_steel_pipe_geometry(inputs, outputs):
     assert pipe.schedule == sch, "Schedule"
 
 
+@pytest.mark.parametrize(
+    "inputs,outputs",
+    [
+        ((13.7 - 2 * 1.65, 1.65, "PE", 3408), (8, 0.25)),
+        (
+            (48.3 - 2 * 1.65, 1.65, "PE", 3408),
+            (
+                40,
+                1.5,
+            ),
+        ),
+        (
+            (355.6 - 2 * 4.78, 4.78, "PE", 3408),
+            (
+                350,
+                14,
+            ),
+        ),
+        (
+            (1016 - 2 * 9.53, 9.53, "PE", 3408),
+            (
+                1000,
+                40,
+            ),
+        ),
+    ],
+)
+def test_polymer_pipe_geometry(inputs, outputs):
+    pipe_diam_mm, pipe_th_mm, polymer, designation = inputs
+    dn, nps = outputs
+    pipe = bp_plc.Polymer_pipe(
+        from_node=node1,
+        to_node=node2,
+        polymer=polymer,
+        polymer_designation=designation,
+        diameter_mm=pipe_diam_mm,
+        thickness_mm=pipe_th_mm,
+    )
+
+    assert pipe.diameter_mm == pipe_diam_mm, "Inner diameter"
+    assert pipe.diameter_out_mm == pipe_diam_mm + 2 * pipe_th_mm, "Outer diameter"
+    assert pipe.A_m2 == pytest.approx(np.pi * (pipe_diam_mm / 1000) ** 2 / 4), (
+        "Cross section area"
+    )
+    assert pipe.dimension_ratio == round(
+        (pipe_diam_mm + 2 * pipe_th_mm) / pipe_th_mm, 2
+    ), "Dimension ratio"
+    assert pipe.DN == dn, "DN"
+    assert pipe.NPS == nps, "NPS"
+    assert pipe.material == "polymer", "Material"
+
+
 def test_steel_pipe_design_pressure():
     pipe = bp_plc.Steel_pipe(
         from_node=node1,
@@ -62,3 +114,16 @@ def test_steel_pipe_design_pressure():
         design_option=0.72, location_class=1, joint_factor=1, T_derating_factor=1
     )
     assert pipe.design_pressure_MPa == pytest.approx(6.979688)
+
+
+def test_polymer_pipe_design_pressure():
+    polymer_pipe = bp_plc.Polymer_pipe(
+        from_node=node1,
+        to_node=node2,
+        polymer="PE",
+        polymer_designation=3408,
+        diameter_mm=102.2,
+        thickness_mm=11.36,
+    )
+    polymer_pipe.pipe_assessment(design_option=0.32)
+    assert polymer_pipe.design_pressure_MPa == pytest.approx(0.7060234240000001)
