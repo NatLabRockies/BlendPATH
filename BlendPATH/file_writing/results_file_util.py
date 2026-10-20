@@ -39,6 +39,7 @@ TRANSMISSION_ONLY_LCOT = {
 def write_disclaimer_sheet(workbook: xlsxwriter.Workbook) -> None:
     wks = bp_file_w.add_worksheet(workbook=workbook, name="Disclaimer")
     wks.write(1, 0, disclaimer_message())
+    wks.set_column("A:A", 100, workbook.add_format({"text_wrap": True}))
 
 
 def write_inputs_sheet(
