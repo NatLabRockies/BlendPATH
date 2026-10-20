@@ -26,6 +26,7 @@ dependencies = [
     "pandas",
     "cantera",
     "importlib_resources",
+    "ipykernel",
     "geopandas",
     "scipy",
     "shapely",
