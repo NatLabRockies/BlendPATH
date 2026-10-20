@@ -36,7 +36,7 @@ def plot(
         chosen_pipes = network.pipes.values()
 
     # collect pipe and node coords and values
-    cmap = mpl.cm.get_cmap(cmap_name)
+    cmap = mpl.colormaps[cmap_name]
     edge_collection, color_normal, edge_pos = get_pipe_values(
         pipes=chosen_pipes,
         property_range=property_range,
