@@ -183,6 +183,7 @@ def mod_network_file_name(
     blend: float,
     design_option: float,
     filename_suffix: str,
+    scenario_type: Scenario_type,
 ) -> str:
     """
     Check if dir exists. Returns path to network file
@@ -198,14 +199,16 @@ def mod_network_file_name(
         if not os.path.exists(filepaths):
             os.makedirs(filepaths)
 
-    new_filename = f"{mod_type.upper()}_{blend}_{design_option}_"
+    new_filename = f"{mod_type.upper()}_{blend}_"
+    if scenario_type == Scenario_type.TRANSMISSION:
+        new_filename = f"{new_filename}_{design_option.steel}_"
     return f"{network_dir}/{new_filename}network_design{filename_suffix}.xlsx"
 
 
 def mod_handler(
     mod_type: _MOD_TYPES,
     network: BlendPATH_network,
-    design_option: str | float,
+    design_option: bp_pa.Design_options,
     new_filename_full: str,
     design_params: Design_params,
     costing_params: bp_cost.Costing_params,
@@ -391,7 +394,6 @@ def get_mod_costing_params_distribution(
             costing_params=costing_params,
         )
     )
-
 
     return Mod_costing_params(
         capacity=network.capacity_MMBTU_day,
@@ -646,7 +648,7 @@ class pipe_diam_params:
     dn: float
     pressure_rating_MPa: float
     material: Literal["steel", "polymer"]
-    design_option: float
+    design_option: bp_pa.Design_options
     design_params: Design_params
     grade: str = None
     polymer: str = None
@@ -677,7 +679,7 @@ def get_next_diameter_polymer(
             if inner_diameter > pipe_params_in.inner_diameter_mm:
                 th = SCHEDULES_PE_ID[nps_diam]["thickness_mm"][::-1][i]
                 pressure_rating = plastic_pipe.design_pressure_thermoplastic(
-                    design_factor=pipe_params_in.design_option,
+                    design_factor=pipe_params_in.design_option.polymer,
                     sdr=round(inner_diameter / th, 2),
                     polymer=pipe_params_in.polymer,
                     polymer_designation=pipe_params_in.polymer_designation,
@@ -703,7 +705,7 @@ def get_next_diameter_steel(
 
     SMYS, SMTS = bp_pa.get_SMYS_SMTS(pipe_params_in.grade)
     design_factor = bp_pa.get_design_factor(
-        design_option=pipe_params_in.design_option,
+        design_option=pipe_params_in.design_option.steel,
         location_class=pipe_params_in.design_params.asme.location_class,
     )
 
@@ -714,15 +716,13 @@ def get_next_diameter_steel(
         if dn_diam_index >= len(DN_DIAM_LIST):
             raise RuntimeError("Did not find next diameter")
         dn_diam = DN_DIAM_LIST[dn_diam_index]
-        for i, inner_diameter in enumerate(
-            SCHEDULES_STEEL_ID[dn_diam]["diameter_mm"][::-1]
-        ):
+        for i, inner_diameter in enumerate(SCHEDULES_STEEL_ID[dn_diam]["diameter_mm"]):
             if inner_diameter > pipe_params_in.inner_diameter_mm:
-                th = SCHEDULES_STEEL_ID[dn_diam]["thickness_mm"][::-1][i]
+                th = SCHEDULES_STEEL_ID[dn_diam]["thickness_mm"][i]
 
                 pressure_ASME_MPa = bp_pa.get_design_pressure_ASME(
                     design_p_MPa=pipe_params_in.pressure_rating_MPa,
-                    design_option=pipe_params_in.design_option,
+                    design_option=pipe_params_in.design_option.steel,
                     SMYS=SMYS,
                     SMTS=SMTS,
                     t=th,

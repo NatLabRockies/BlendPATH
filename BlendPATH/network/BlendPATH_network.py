@@ -1162,13 +1162,23 @@ class BlendPATH_network:
         """
         Assess pipe MAOP based on ASME B31.12
         """
-        for pipe in self.pipes.values():
-            pipe.pipe_assessment(
-                design_option=design_option,
-                location_class=ASME_params.location_class,
-                joint_factor=ASME_params.joint_factor,
-                T_derating_factor=ASME_params.T_rating,
-            )
+        if self.scenario_type == Scenario_type.DISTRIBUTION:
+            for pipe in self.pipes.values():
+                df = 0.32 if isinstance(pipe, plc.Polymer_pipe) else 0.4
+                pipe.pipe_assessment(
+                    design_option=df,
+                    location_class=ASME_params.location_class,
+                    joint_factor=ASME_params.joint_factor,
+                    T_derating_factor=ASME_params.T_rating,
+                )
+        else:
+            for pipe in self.pipes.values():
+                pipe.pipe_assessment(
+                    design_option=design_option.steel,
+                    location_class=ASME_params.location_class,
+                    joint_factor=ASME_params.joint_factor,
+                    T_derating_factor=ASME_params.T_rating,
+                )
 
     def check_segmentation(self) -> None:
         """

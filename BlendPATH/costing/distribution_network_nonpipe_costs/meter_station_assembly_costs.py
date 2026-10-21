@@ -4,7 +4,7 @@ Based on https://www.socalgas.com/sites/default/files/Chapter-10.pdf
 Total MSA Costs (Dollars) (F)
 """
 
-DEFAULT_MSA_BLEND_LIMIT = 0.25
+DEFAULT_MSA_BLEND_LIMIT = 0.20
 
 import numpy as np
 from numpy import typing as npt

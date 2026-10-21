@@ -1,6 +1,7 @@
 import pytest
 
 import BlendPATH
+from BlendPATH.util.pipe_assessment import Design_options
 
 wangetal = BlendPATH.BlendPATH_scenario(
     casestudy_name="examples/wangetal2018",
@@ -40,13 +41,18 @@ INPUTS = {
         ((1.5, True), ValueError),
     ],
     "design_option": [
-        (("a", False), "a"),
-        (("b", False), "b"),
-        (("nfc", False), "nfc"),
-        (("no fracture criterion", False), "no fracture criterion"),
+        (("a", False), Design_options(steel="a", polymer="a")),
+        (("b", False), Design_options(steel="b", polymer="b")),
+        (("nfc", False), Design_options(steel="nfc", polymer="nfc")),
+        (
+            ("no fracture criterion", False),
+            Design_options(
+                steel="no fracture criterion", polymer="no fracture criterion"
+            ),
+        ),
         (("c", True), ValueError),
-        ((0.3, False), 0.3),
-        ((0.82, False), 0.82),
+        ((0.3, False), Design_options(steel=0.3, polymer=0.3)),
+        ((0.82, False), Design_options(steel=0.82, polymer=0.82)),
         ((1.1, True), ValueError),
         ((0, True), ValueError),
         ((-0.1, True), ValueError),

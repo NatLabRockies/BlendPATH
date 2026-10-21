@@ -12,6 +12,7 @@ SCHEDULES_STEEL_SCH = defaultdict(lambda: defaultdict(dict))
 SCHEDULES_STEEL_ID = defaultdict(lambda: defaultdict(list))
 SCHEDULES_PE_DN = {}
 SCHEDULES_PE_ID = defaultdict(lambda: defaultdict(list))
+POLYMER_SDR_TABLE = {}
 
 
 with open(schedule_file, newline="") as csvfile:
@@ -20,7 +21,7 @@ with open(schedule_file, newline="") as csvfile:
         SCHEDULES_STEEL_DN[float(row["Outer diameter [mm]"])] = float(row["DN"])
 
         for sch in row:
-            if (sch not in ["DN", "Outer diameter [mm]"]) and (not row[sch] == ""):
+            if (sch not in ["DN", "Outer diameter [mm]"]) and (row[sch] != ""):
                 SCHEDULES_STEEL_SCH[float(row["DN"])][sch] = float(row[sch])
                 SCHEDULES_STEEL_ID[float(row["DN"])]["thickness_mm"].append(
                     float(row[sch])
@@ -39,6 +40,9 @@ with open(schedule_pe_file, newline="") as csvfile:
         SCHEDULES_PE_ID[float(row["nom_size_in"])]["thickness_mm"].append(
             float(row["t_min_mm"])
         )
+        POLYMER_SDR_TABLE[
+            (round(float(row["od_mm"]), 2), round(float(row["t_min_mm"]), 2))
+        ] = float(row["dr"]) if row["dr"] != "" else None
 
 for i, v in SCHEDULES_PE_ID.items():
     combined_lists = zip(

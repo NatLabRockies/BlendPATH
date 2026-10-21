@@ -33,7 +33,7 @@ class compressor_bypass:
 
 def direct_replacement(
     network: BlendPATH_network,
-    design_option: str = "b",
+    design_option: bp_pa.Design_options,
     new_filename: str = "modified",
     design_params: Design_params = None,
     costing_params: bp_cost.Costing_params = None,
@@ -87,7 +87,7 @@ def direct_replacement(
             for dn_i, dn in enumerate(dn_options):
                 # Get all schedules for this combination
                 (th_valid, schedule_valid, pressure_valid) = ps.get_viable_schedules(
-                    design_option=design_option,
+                    design_option=design_option.steel,
                     ASME_params=design_params.asme,
                     grade=grade,
                     ASME_pressure_flag=False,

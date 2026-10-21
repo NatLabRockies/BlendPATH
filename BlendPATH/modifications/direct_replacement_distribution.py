@@ -10,6 +10,7 @@ import BlendPATH.modifications.mod_util as bp_mod_util
 from BlendPATH.modifications.parallel_loop import make_loop_network
 from BlendPATH.network.BlendPATH_network import BlendPATH_network
 from BlendPATH.scenario_helper import Design_params
+from BlendPATH.util.pipe_assessment import Design_options
 
 if TYPE_CHECKING:
     from BlendPATH.network.pipeline_components import Pipe
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 def direct_replacement_distribution(
     network: BlendPATH_network,
-    design_option: str = "b",
+    design_option: Design_options,
     new_filename: str = "modified",
     design_params: Design_params = None,
     costing_params: bp_cost.Costing_params = None,
@@ -329,7 +330,7 @@ def make_result_file(filename: str, network: BlendPATH_network, update_pipes: di
 
 def remedy_high_dpdx(
     network: BlendPATH_network,
-    design_option: str,
+    design_option: Design_options,
     design_params: Design_params,
     original_diameters: dict[str, tuple[float, float, float, float, float]],
 ) -> dict[str, "bp_mod_util.New_pipes"]:
@@ -337,7 +338,7 @@ def remedy_high_dpdx(
 
     Args:
         network (BlendPATH_network): Network
-        design_option (str): Design option
+        design_option (Design_options): Design option
         design_params (Design_params): Design parameters
 
     Raises:
@@ -436,7 +437,7 @@ def remedy_high_dpdx(
 
 def check_high_dpdx(
     network: BlendPATH_network,
-    design_option: str,
+    design_option: Design_options,
     design_params: Design_params,
     original_diameters: dict[str, tuple[float, float, float, float, float]],
 ) -> dict[str, "bp_mod_util.New_pipes"]:
@@ -462,7 +463,7 @@ def check_high_dpdx(
 def build_pipe_params(
     pipe: "Pipe",
     design_params: Design_params,
-    design_option: str,
+    design_option: Design_options,
     pressure_rating_MPa_override: float | None = None,
 ):
     return bp_mod_util.pipe_diam_params(
@@ -494,4 +495,5 @@ def build_new_pipes(pipe: "Pipe", p_rating):
         to_node=pipe.to_node.name,
         roughness_mm=pipe.roughness_mm,
         pressure=p_rating,
+        schedule=getattr(pipe, "schedule", ""),
     )

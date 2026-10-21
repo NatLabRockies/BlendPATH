@@ -40,9 +40,9 @@ class PL_res:
 
 def parallel_loop(
     network: BlendPATH_network,
-    design_params: Design_params = None,
-    design_option: str = "b",
+    design_option: bp_pa.Design_options,
     new_filename: str = "modified",
+    design_params: Design_params = None,
     costing_params: bp_cost.Costing_params = None,
     allow_compressor_bypass: bool = False,
 ) -> tuple:
@@ -155,7 +155,7 @@ def parallel_loop(
 
                         # Get closest schedule that satifies design pressure
                         (th, schedule, pressure) = ps.get_viable_schedules(
-                            design_option=design_option,
+                            design_option=design_option.steel,
                             ASME_params=design_params.asme,
                             grade=grade,
                             ASME_pressure_flag=True,

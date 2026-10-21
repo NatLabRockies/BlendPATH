@@ -10,7 +10,8 @@ import BlendPATH.modifications.mod_util as bp_mod_util
 import BlendPATH.network.pipeline_components as bp_plc
 from BlendPATH.modifications.parallel_loop import make_loop_network
 from BlendPATH.network.BlendPATH_network import BlendPATH_network
-from BlendPATH.scenario_helper import SCENARIO_VALUES, Design_params, Scenario_type
+from BlendPATH.scenario_helper import Design_params
+from BlendPATH.util.pipe_assessment import Design_options
 
 if TYPE_CHECKING:
     from BlendPATH.network.pipeline_components import Pipe
@@ -20,9 +21,7 @@ SUFFIX = "_mod_looped"
 
 def parallel_loop_distribution(
     network: BlendPATH_network,
-    design_option: str = SCENARIO_VALUES[
-        Scenario_type.DISTRIBUTION
-    ].default_design_option,
+    design_option: Design_options,
     new_filename: str = "modified",
     design_params: Design_params = None,
     costing_params: bp_cost.Costing_params = None,
@@ -195,9 +194,7 @@ def parallel_loop_distribution(
 
 def parallel_loop_distribution_alt(
     network: BlendPATH_network,
-    design_option: str = SCENARIO_VALUES[
-        Scenario_type.DISTRIBUTION
-    ].default_design_option,
+    design_option: Design_options,
     new_filename: str = "modified",
     design_params: Design_params = None,
     costing_params: bp_cost.Costing_params = None,
@@ -440,7 +437,7 @@ def make_result_file(filename: str, network: BlendPATH_network, update_pipes: di
 
 def remedy_high_dpdx(
     network: BlendPATH_network,
-    design_option: str,
+    design_option: Design_options,
     design_params: Design_params,
 ) -> tuple[
     dict[str, "bp_mod_util.New_pipes"], dict[str, "bp_plc.Pipe"], dict[str, str]
@@ -606,7 +603,7 @@ def remedy_high_dpdx(
 
 def check_high_dpdx(
     network: BlendPATH_network,
-    design_option: str,
+    design_option: Design_options,
     design_params: Design_params,
 ) -> tuple[
     dict[str, "bp_mod_util.New_pipes"], dict[str, "bp_plc.Pipe"], dict[str, str]
@@ -634,7 +631,7 @@ def build_pipe_params(
     looped_parent_pipes: dict[str, str],
     network: "BlendPATH_network",
     design_params: Design_params,
-    design_option: str,
+    design_option: Design_options,
     pressure_rating_MPa_override: float | None = None,
 ):
     if pipe.name in looped_parent_pipes:

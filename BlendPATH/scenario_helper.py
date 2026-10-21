@@ -32,7 +32,12 @@ from BlendPATH.costing.distribution_network_nonpipe_costs.valves import (
 from BlendPATH.costing.pipe_costs.anl_pipe_correlations import ANL_COEFS
 from BlendPATH.costing.pipe_costs.polymer_pipe_costs import polymer_pipe_fxns
 from BlendPATH.emissions.emissions_params import EmissionsParams
-from BlendPATH.util.pipe_assessment import _DESIGN_OPTIONS, ASME_consts
+from BlendPATH.util.pipe_assessment import (
+    _DESIGN_OPTIONS,
+    ASME_consts,
+    Design_options,
+    check_design_option,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +83,8 @@ class Scenario_type:
 class ScenarioValues:
     max_pressure_pa: float
     min_pressure_pa: float
-    default_design_option: str | float
+    default_design_option: Design_options
+    new_pipe_design_option: Design_options
     c_relax: float
 
 
@@ -87,14 +93,16 @@ SCENARIO_VALUES = {
     Scenario_type.TRANSMISSION: ScenarioValues(
         max_pressure_pa=200 * gl.BAR2PA,
         min_pressure_pa=20 * gl.BAR2PA,
-        default_design_option="b",
+        default_design_option=Design_options(steel="nfc", polymer=0.32),
+        new_pipe_design_option=Design_options(steel="b", polymer=0.32),
         c_relax=1.5,
     ),
     Scenario_type.DISTRIBUTION: ScenarioValues(
         max_pressure_pa=3 * gl.BAR2PA,
         min_pressure_pa=0.01 * gl.BAR2PA,
-        default_design_option=0.32,
-        c_relax=3.0,
+        default_design_option=Design_options(steel=0.4, polymer=0.32),
+        new_pipe_design_option=Design_options(steel=0.4, polymer=0.32),
+        c_relax=2.0,
     ),
 }
 
@@ -159,6 +167,8 @@ def process_default_inputs_regions(value: Any) -> Any:
 
 def process_default_inputs_design_option(value: Any) -> Any:
     # determine if value is numeric or not
+    if value is None:
+        return None
     is_float = False
     try:
         value = float(value)
@@ -313,11 +323,11 @@ _SCENARIO_INPUTS = {
     ),
     "design_option": Scenario_Input(
         name="_design_option",
-        default_val="b",
+        default_val=None,
         formatting=[process_default_inputs_design_option],
     ),
     "ng_price": Scenario_Input(name="ng_price", default_val=7.39, subcategory=True),
-    "h2_price": Scenario_Input(name="h2_price", default_val=4.40756, subcategory=True),
+    "h2_price": Scenario_Input(name="h2_price", default_val=3, subcategory=True),
     "elec_price": Scenario_Input(name="elec_price", default_val=0.07, subcategory=True),
     "region": Scenario_Input(
         name="region",
@@ -631,6 +641,14 @@ def process_default_inputs(
     temp_inputs = get_local_kwargs_overrides(
         intialization_inputs=intialization_inputs, temp_inputs=temp_inputs
     )
+
+    # design option formatting
+    if temp_inputs["design_option"] is None:
+        temp_inputs["design_option"] = SCENARIO_VALUES[
+            temp_inputs["scenario_type"]
+        ].default_design_option
+    else:
+        temp_inputs["design_option"] = check_design_option(temp_inputs["design_option"])
 
     # assign to scenario instance and separate out grouped params
     costing_params, design_params, network_params = assign_inputs(

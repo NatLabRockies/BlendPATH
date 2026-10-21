@@ -8,7 +8,6 @@ distribution = BlendPATH.BlendPATH_scenario(
     scenario_type="distribution",
     # Define the design factor used to set the design pressure of existing
     # pipeline segments that will transport hydrogen as a blend or in pure form
-    design_option=0.32,
 )
 
 # Set the desired hydrogen content (in vol. %) in pipeline gas for analysis
@@ -20,7 +19,7 @@ distribution.max_velocity_distribution = 20
 # Run pipeline modification analysis with run_mod using the defined mod_type
 # modification strategy. New pipeline infrastructure that is added to the
 # existing pipeline network is rated to the defined design factor with run_mod
-distribution.run_mod(mod_type="direct_replacement", design_option=0.32)
+distribution.run_mod(mod_type="direct_replacement")
 
 # Result xlsx files are outputted within a user-designated result_dir (defined in
 # default_inputs.csv) under the casestudy_name folder.

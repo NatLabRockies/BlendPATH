@@ -88,7 +88,7 @@ class BlendPATH_scenario:
         design_option:str = None - Design option for new pipe
         """
         if design_option is None:
-            design_option = SCENARIO_VALUES[self.scenario_type].default_design_option
+            design_option = SCENARIO_VALUES[self.scenario_type].new_pipe_design_option
 
         self.mod_type = bp_mod_util.check_mod_method(mod_type)
         # Update design option for new pipe
@@ -105,6 +105,7 @@ class BlendPATH_scenario:
             blend=self.blend,
             design_option=self.design_option,
             filename_suffix=self.filename_suffix,
+            scenario_type=self.scenario_type,
         )
 
         # Send to modification method handler
@@ -180,7 +181,12 @@ class BlendPATH_scenario:
         """
         Create result file with summary values
         """
-        results_file_name = f"{self.casestudy_name}/{self.results_dir}/ResultFiles/{self.mod_type.upper()}_{self.blend}_{self.design_option}{self.filename_suffix}.xlsx"
+        design_option_adjustment = (
+            ""
+            if self.scenario_type == Scenario_type.DISTRIBUTION
+            else f"_{self.design_option.steel}"
+        )
+        results_file_name = f"{self.casestudy_name}/{self.results_dir}/ResultFiles/{self.mod_type.upper()}_{self.blend}{design_option_adjustment}{self.filename_suffix}.xlsx"
 
         workbook = bp_file_w.file_setup(filename=results_file_name)
 

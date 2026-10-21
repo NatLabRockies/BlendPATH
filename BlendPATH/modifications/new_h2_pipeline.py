@@ -204,7 +204,7 @@ def sample_parallel_route_at_chainage(
 
 def new_h2_pipeline(
     network: BlendPATH_network,
-    design_option: str,
+    design_option: bp_pa.Design_options,
     new_filename: str,
     design_params: Design_params,
     costing_params: bp_cost.Costing_params,
@@ -214,10 +214,10 @@ def new_h2_pipeline(
 
     Args:
         network (BlendPATH_network): Original network
-        design_option (str, optional): Design option for new pipes
-        new_filename (str, optional): Filename for new network file
-        design_params (Design_params, optional): Scenario design parameters
-        costing_params (bp_cost.Costing_params, optional): Scenario costing parameters
+        design_option (bp_pa.Design_options): Design option for new pipes
+        new_filename (str): Filename for new network file
+        design_params (Design_params): Scenario design parameters
+        costing_params (bp_cost.Costing_params): Scenario costing parameters
 
     Returns:
         tuple[dict[str, bp_mod_util.New_pipes], dict, list, list]: new_pipes, combined pipes, n_compressors, l_compressors
@@ -515,7 +515,7 @@ def get_supply_pressure(network: BlendPATH_network) -> float:
 
 
 def get_thickness(
-    design_option: str,
+    design_option: bp_pa.Design_options,
     ASME_params: bp_pa.ASME_consts,
     grade: str,
     supply_pressure_MPa: float,
@@ -524,7 +524,7 @@ def get_thickness(
     """Get thickness and schedule based on pressure rating
 
     Args:
-        design_option (str): Design option for new pipe
+        design_option (bp_pa.Design_options): Design option for new pipe
         ASME_params (bp_pa.ASME_consts): ASME rating constants
         grade (str): Steel grade
         supply_pressure_MPa (float): Pressure to rate to
@@ -535,7 +535,7 @@ def get_thickness(
     """
     (th, schedule, pressure, index) = bp_pa.get_viable_schedules(
         sch_list=SCHEDULES_STEEL_SCH[dn],
-        design_option=design_option,
+        design_option=design_option.steel,
         ASME_params=ASME_params,
         grade=grade,
         p_max_mpa_g=supply_pressure_MPa,
