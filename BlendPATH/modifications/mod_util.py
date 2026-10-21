@@ -353,20 +353,11 @@ def get_mod_costing_params_distribution(
         pressure_psig=np.full_like(demand_pressures_psi_g, 0.0),
     )
 
-    # Gas pressure regulation and metering station
-    # gprms_cost = bp_dist_costs.get_gprms_cost()
-
-    # Gas pressure regulation and metering station
-    # original_blend = network.composition.x.get("H2", 0)
     additional_m3_s = -mod_result.original_sm3_s
-    # for b_i, b in enumerate([0, original_blend]):
-    #     network.blendH2(blend=b)
     for d in network.demand_nodes.values():
         rho, _ = d.node.composition.get_rho_z(p_gauge_pa=0, x=d.node.x_h2, mw=d.node.mw)
-        # if b_i == 0:
         additional_m3_s += d.flowrate_mdot / rho
-        # else:
-        #     additional_m3_s += d.flowrate_mdot / rho
+
     odorization = bp_dist_costs.get_odorization_cost(
         sm3_s=additional_m3_s,
         costing_params=costing_params,
@@ -374,17 +365,10 @@ def get_mod_costing_params_distribution(
     )
 
     # Regulators
-    # n_supply_regulator_refurbishment = sum(
-    #     1 for sn in network.supply_nodes.values() if sn.blend > blend
-    # )
-
     supply_regulator_refurbishment = bp_dist_costs.get_regulator_refubishment_cost(
         supply_nodes=network.supply_nodes, blend=blend, costing_params=costing_params
     )
-    # # This is the same as no blending?
-    # regulator_maintenance = bp_dist_costs.get_regulator_maintenance_cost(
-    #     n_regulators=n_regulator_refurbishment
-    # )
+
     leak_survey = bp_dist_costs.get_leak_survey_cost(
         new_pipe_length=new_pipe_length,
         mod_type=mod_result.mod_type,
@@ -408,11 +392,6 @@ def get_mod_costing_params_distribution(
         )
     )
 
-    # O&M
-    # o_and_m = bp_dist_costs.get_o_and_m_cost(
-    #     cost_type="AGA_bundled",
-    #     pipe_km=new_pipe_length,
-    # )
 
     return Mod_costing_params(
         capacity=network.capacity_MMBTU_day,
