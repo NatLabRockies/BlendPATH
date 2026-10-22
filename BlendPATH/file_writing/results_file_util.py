@@ -199,7 +199,10 @@ def write_mod_network_sheet(
             segment = nodes_map[pipe.to_node.name]
         # Get new/existing
         new_old = "Existing"
-        maop = pipe.p_max_mpa_g
+        if pipe.name in network.pipes:
+            maop = network.pipes[pipe.name].design_pressure_MPa
+        else:
+            maop = pipe.p_max_mpa_g
         if mod_type in ["pl"]:
             if (
                 network.scenario_type == Scenario_type.TRANSMISSION
