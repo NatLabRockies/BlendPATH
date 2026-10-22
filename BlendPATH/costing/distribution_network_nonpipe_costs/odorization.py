@@ -4,7 +4,7 @@ Module for determining odorization costs
 
 import BlendPATH.costing.costing as bp_cost
 
-DEFAULT_ODORANT_COST = 3  # [$/lb]
+DEFAULT_ODORANT_COST = 15.53  # [$/lb]
 DEFAULT_ODORANT_USE = 0.5  # [lb/mmscf]
 H2_LEL = 0.04
 CH4_LEL = 0.05
