@@ -28,6 +28,7 @@ from BlendPATH.network import BlendPATH_network
 from BlendPATH.scenario_helper import SCENARIO_VALUES, Design_params, Scenario_type
 from BlendPATH.util import plastic_pipe
 from BlendPATH.util.pipe_dimensions import _DN_NPS_MAP, _NPS_DN_MAP
+from BlendPATH.util.plastic_pipe import get_sdr
 from BlendPATH.util.schedules import SCHEDULES_PE_ID, SCHEDULES_STEEL_ID
 
 NPS_DIAM_LIST = np.asarray(list(SCHEDULES_PE_ID.keys()))
@@ -680,7 +681,7 @@ def get_next_diameter_polymer(
                 th = SCHEDULES_PE_ID[nps_diam]["thickness_mm"][::-1][i]
                 pressure_rating = plastic_pipe.design_pressure_thermoplastic(
                     design_factor=pipe_params_in.design_option.polymer,
-                    sdr=round(inner_diameter / th, 2),
+                    sdr=get_sdr(od_mm=inner_diameter + 2 * th, th_mm=th),
                     polymer=pipe_params_in.polymer,
                     polymer_designation=pipe_params_in.polymer_designation,
                 )

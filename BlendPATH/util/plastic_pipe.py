@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Final, Union
 
 import BlendPATH.Global as gl
+from BlendPATH.util.schedules import POLYMER_SDR_TABLE
 
 _HDB_COLS: Final[str] = [
     "polymer",  # "PE" / "PA" / …
@@ -75,3 +76,10 @@ def design_pressure_thermoplastic(
     hdb_psi = get_hdb_psi(polymer, polymer_designation)
     P_psi = 2.0 * hdb_psi * design_factor / (sdr - 1.0)
     return P_psi * gl.PSI2MPA
+
+
+def get_sdr(od_mm: float, th_mm: float) -> float:
+    key = (round(od_mm, 2), round(th_mm, 2))
+    if key in POLYMER_SDR_TABLE and POLYMER_SDR_TABLE[key] is not None:
+        return POLYMER_SDR_TABLE[key]
+    return round(od_mm / th_mm, 2)

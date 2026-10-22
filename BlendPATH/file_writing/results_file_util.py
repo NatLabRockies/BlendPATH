@@ -15,7 +15,7 @@ from BlendPATH.network.pipeline_components import PipeSegmentDist
 from BlendPATH.scenario_helper import Scenario_type
 from BlendPATH.util.disclaimer import disclaimer_message
 from BlendPATH.util.pipe_assessment import _POLYMER_CODES
-from BlendPATH.util.schedules import POLYMER_SDR_TABLE
+from BlendPATH.util.plastic_pipe import get_sdr
 
 if TYPE_CHECKING:
     from BlendPATH import BlendPATH_network, BlendPATH_scenario
@@ -881,17 +881,8 @@ def format_new_pipes_distribution(mod_result: "Mod_result") -> list:
         if new_pipe.th <= 0:
             continue
         if str(new_pipe.grade).strip().upper()[:2] in _POLYMER_CODES:
-            sdr = (new_pipe.inner_diameter + 2 * new_pipe.th) / new_pipe.th
-            key = (
-                round(new_pipe.inner_diameter + 2 * new_pipe.th, 2),
-                round(new_pipe.th, 2),
-            )
-            new_sdr = (
-                POLYMER_SDR_TABLE.get(key, sdr)
-                if POLYMER_SDR_TABLE.get(key, sdr) is not None
-                else sdr
-            )
-            label = f"SDR {round(new_sdr, 1):g}"
+            od_mm = new_pipe.inner_diameter + 2 * new_pipe.th
+            label = f"SDR {round(get_sdr(od_mm=od_mm, th_mm=new_pipe.th), 1):g}"
         else:
             label = f"{new_pipe.schedule}"
         schedule_sdr.setdefault(new_pipe.D_S_G, set()).add(label)

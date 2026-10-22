@@ -1,7 +1,7 @@
 import BlendPATH.util.pipe_dimensions
 from BlendPATH.network.pipeline_components import Node, Pipe, friction_factor
 from BlendPATH.util import plastic_pipe
-from BlendPATH.util.schedules import POLYMER_SDR_TABLE
+from BlendPATH.util.plastic_pipe import get_sdr
 
 
 class Polymer_pipe(Pipe):
@@ -73,7 +73,4 @@ class Polymer_pipe(Pipe):
 
     @property
     def dimension_ratio(self) -> float:
-        key = (round(self.diameter_out_mm, 2), round(self.thickness_mm, 2))
-        if key in POLYMER_SDR_TABLE and POLYMER_SDR_TABLE[key] is not None:
-            return POLYMER_SDR_TABLE[key]
-        return round(self.diameter_out_mm / self.thickness_mm, 2)
+        return get_sdr(od_mm=self.diameter_out_mm, th_mm=self.thickness_mm)
